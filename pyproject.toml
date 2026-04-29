@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xli"
+version = "0.1.0"
+description = "Terminal coding agent — Grok + xAI Collections, with auto-synced project context"
+requires-python = ">=3.11"
+dependencies = [
+  "xai-sdk>=1.11",
+  "openai>=1.40",
+  "loguru>=0.7",
+  "pathspec>=0.12",
+  "prompt_toolkit>=3",
+  "rich>=13",
+]
+
+[project.scripts]
+xli = "xli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xli*"]
