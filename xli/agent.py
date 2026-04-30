@@ -629,7 +629,7 @@ class Agent:
 
         stream = self.clients.chat.chat.completions.create(**kwargs)
 
-        content_parts: list[str] = []
+        current_content: str = ""
         # Reasoning models (grok-4.20-reasoning, etc.) emit private "thinking"
         # tokens in delta.reasoning_content separately from the user-facing
         # answer in delta.content. Capture them so we can surface them when
@@ -670,11 +670,12 @@ class Agent:
                         )
                         live.start()
                         streamed_any = True
-                    content_parts.append(delta.content)
+                    # Treat delta.content as cumulative (full text so far) to fix repetition bug.
+                    current_content = delta.content
                     # Re-render the full buffer through Markdown so styling
                     # converges as text accumulates. Cheap enough at 10 fps
                     # for responses up to a few thousand tokens.
-                    live.update(Markdown("".join(content_parts)))
+                    live.update(Markdown(current_content))
 
                 if getattr(delta, "tool_calls", None):
                     for tcd in delta.tool_calls:
@@ -717,7 +718,7 @@ class Agent:
             )
             streamed_any = True  # suppress empty-text re-print in REPL
 
-        content = "".join(content_parts) or None
+        content = current_content or None
         tool_calls: Optional[list[Any]] = None
         if tool_buf:
             tool_calls = []

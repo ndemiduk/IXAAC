@@ -216,7 +216,7 @@ def _do_delete(clients, collection_id: str, file_id: str) -> None:
 
 
 def sync_project(
-    clients: Clients,
+    clients: Optional[Clients],
     project: ProjectConfig,
     cfg: GlobalConfig,
     *,

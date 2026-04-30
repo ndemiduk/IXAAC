@@ -14,6 +14,8 @@ dependencies = [
   "pathspec>=0.12",
   "prompt_toolkit>=3",
   "rich>=13",
+  "cryptography>=41",
+  "keyring>=24",
 ]
 
 [project.scripts]
@@ -22,3 +24,6 @@ xli = "xli.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["xli*"]
+
+[tool.setuptools.package-data]
+"xli.stock_plugins" = ["*.md"]

@@ -244,6 +244,21 @@ def t_bash(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             is_error=True,
         )
 
+    # Reasoning models occasionally emit HTML-escaped bash (`&amp;` for `&`,
+    # `&lt;&lt;&lt;` for `<<<`, etc.) — silently breaks heredocs and URLs in
+    # non-obvious ways. Decode BEFORE the gate prompt so the user approves the
+    # command we're actually going to run, not the encoded version.
+    if any(ent in cmd for ent in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&apos;")):
+        import html as _html
+        decoded = _html.unescape(cmd)
+        if decoded != cmd:
+            if ctx.console is not None:
+                ctx.console.print(
+                    "  [yellow]⚠ model emitted HTML-escaped bash — auto-decoded "
+                    "(consider switching to a non-reasoning orchestrator)[/yellow]"
+                )
+            cmd = decoded
+
     # Gate riskier intents on a human y/N (skipped in yolo mode).
     if intent in GATED_INTENTS and not ctx.yolo:
         if ctx.console is None:
@@ -266,14 +281,34 @@ def t_bash(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                 is_error=True,
             )
 
+    # Inject vault-stored secrets for any subscribed plugin's $VAR / ${VAR}
+    # referenced in the command. Cheap when nothing matches — env_for_command
+    # short-circuits before unlocking the vault.
+    env = None
+    if ctx.subscribed_plugins:
+        from xli.plugin import Plugin
+        from xli.vault import env_for_command
+        plugins = [Plugin(id=pid) for pid in ctx.subscribed_plugins]
+        overrides = env_for_command(cmd, plugins)
+        if overrides:
+            import os as _os
+            env = {**_os.environ, **overrides}
+
     try:
+        # Pin to /bin/bash, NOT /bin/sh (which is dash on Debian/Ubuntu and
+        # rejects bash-only constructs like <<< herestrings, [[ ]] tests, and
+        # `${var,,}` case ops). Agents (and our plugin docs) routinely emit
+        # bash-specific syntax — surfacing it as a "bash" tool that ran in dash
+        # would be a constant footgun. Both Linux and macOS ship /bin/bash.
         proc = subprocess.run(
             cmd,
             shell=True,
+            executable="/bin/bash",
             cwd=ctx.project.project_root,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return ToolResult(f"command timed out after {timeout}s", is_error=True)

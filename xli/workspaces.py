@@ -106,7 +106,14 @@ class Workspaces:
 
     def most_recent_project(self) -> Optional[WorkspaceEntry]:
         """The default target for agent-fallback dispatch in the XMPP daemon."""
-        ps = sorted(self.projects(), key=lambda e: e.last_active, reverse=True)
+        # Parse to datetime so mixed offset forms (e.g. "+00:00" vs "Z") sort
+        # by actual instant, not lexicographic-on-string.
+        def _key(e: WorkspaceEntry) -> datetime:
+            try:
+                return datetime.fromisoformat(e.last_active)
+            except ValueError:
+                return datetime.min.replace(tzinfo=timezone.utc)
+        ps = sorted(self.projects(), key=_key, reverse=True)
         return ps[0] if ps else None
 
 

@@ -62,7 +62,7 @@ from xli.transcript import (
 CHAT_RECENT_TURNS = 20  # how many past turns to inline as history at chat start
 
 
-def _handle_ref_command(user_input: str, agent) -> bool:
+def _handle_ref_command(user_input: str, agent, project) -> bool:
     """Handle `/ref` and `/unref` slash commands.
 
     `/ref`            — list currently-attached personas (in-session state)
@@ -139,6 +139,7 @@ def _handle_ref_command(user_input: str, agent) -> bool:
             console.print(f"[dim](already attached: {name})[/dim]")
             return True
         agent.attached_refs.append((name, cid))
+        save_attached_refs(project, agent)
         console.print(
             f"[green]✓[/green] attached [cyan]{name}[/cyan]'s memory — "
             "[dim]search_project will now include their conversation history[/dim]"
@@ -156,6 +157,7 @@ def _handle_ref_command(user_input: str, agent) -> bool:
             console.print(f"[dim]no ref attached named {name!r}[/dim]")
         else:
             console.print(f"[green]✓[/green] detached [cyan]{name}[/cyan]")
+            save_attached_refs(project, agent)
         return True
 
     return False
@@ -287,19 +289,110 @@ def _handle_lib_command(user_input: str, project) -> bool:
 def _attachment_tag(agent) -> str:
     """Compact prompt-line indicator for /ref + /doc attachments.
 
-    Returns '+1r', '+2d', '+1r/2d', or '' (when nothing is attached). Inlined
-    into the prompt prefix in both REPLs so users always see at a glance
-    whether anything extra is in scope this session.
+    Returns '+1r', '+2d', '+1r/2d', or '' (when nothing is attached). Trailing
+    '!' is added when any attached doc exceeds INLINE_SOFT_CAP_BYTES — a
+    persistent reminder that the system prompt is heavy on every turn, since
+    the at-attach-time warning is easy to forget.
     """
     parts = []
     if agent.attached_refs:
         parts.append(f"{len(agent.attached_refs)}r")
     if agent.attached_docs:
-        parts.append(f"{len(agent.attached_docs)}d")
+        from xli.doc import INLINE_SOFT_CAP_BYTES
+        oversized = any(len(c) > INLINE_SOFT_CAP_BYTES for _, c in agent.attached_docs)
+        parts.append(f"{len(agent.attached_docs)}d" + ("!" if oversized else ""))
     return ("+" + "/".join(parts)) if parts else ""
 
 
-def _handle_doc_command(user_input: str, agent) -> bool:
+def load_attached_refs(project: ProjectConfig, agent: Agent) -> None:
+    """Load persistent ref attachments from .xli/refs.txt."""
+    # This function reads saved references (personas) from a file
+    # and adds them to the agent so they are available in this session.
+    refs_file = project.xli_dir / 'refs.txt'
+    if not refs_file.exists():
+        return
+    with refs_file.open('r') as f:
+        names = [line.strip() for line in f if line.strip()]
+    loaded = 0
+    for name in names:
+        if not is_valid_name(name):
+            console.print(f"[yellow]Skipping invalid persona name in refs.txt: {name}[/yellow]")
+            continue
+        persona = Persona(name)
+        if not persona.exists():
+            console.print(f"[yellow]Skipping missing persona in refs.txt: {name}[/yellow]")
+            continue
+        cid = persona.collection_id()
+        if not cid:
+            console.print(f"[yellow]Skipping persona without collection in refs.txt: {name}[/yellow]")
+            continue
+        if any(n == name for n, _ in agent.attached_refs):
+            continue
+        agent.attached_refs.append((name, cid))
+        loaded += 1
+    if loaded > 0:
+        console.print(f"[dim]Loaded {loaded} persistent ref(s) from .xli/refs.txt[/dim]")
+
+
+def save_attached_refs(project: ProjectConfig, agent: Agent) -> None:
+    """Save current ref attachments to .xli/refs.txt for persistence."""
+    # This function writes the current references (personas) to a file
+    # so they are saved and can be loaded next time you start the REPL.
+    refs_file = project.xli_dir / 'refs.txt'
+    names = sorted(name for name, _ in agent.attached_refs)
+    if not names:
+        if refs_file.exists():
+            refs_file.unlink()
+        return
+    with refs_file.open('w') as f:
+        for name in names:
+            f.write(f"{name}\n")
+
+
+def load_attached_docs(project: ProjectConfig, agent: Agent) -> None:
+    """Load persistent doc attachments from .xli/docs.txt."""
+    # This function reads saved documents from a file
+    # and adds their content to the agent for use in this session.
+    from xli.doc import Doc, is_valid_name as is_valid_doc_name
+    docs_file = project.xli_dir / 'docs.txt'
+    if not docs_file.exists():
+        return
+    with docs_file.open('r') as f:
+        names = [line.strip() for line in f if line.strip()]
+    loaded = 0
+    for name in names:
+        if not is_valid_doc_name(name):
+            console.print(f"[yellow]Skipping invalid doc name in docs.txt: {name}[/yellow]")
+            continue
+        doc = Doc(name)
+        if not doc.exists():
+            console.print(f"[yellow]Skipping missing doc in docs.txt: {name}[/yellow]")
+            continue
+        content = doc.read()
+        if any(n == name for n, _ in agent.attached_docs):
+            continue
+        agent.attached_docs.append((name, content))
+        loaded += 1
+    if loaded > 0:
+        console.print(f"[dim]Loaded {loaded} persistent doc(s) from .xli/docs.txt[/dim]")
+
+
+def save_attached_docs(project: ProjectConfig, agent: Agent) -> None:
+    """Save current doc attachments to .xli/docs.txt for persistence."""
+    # This function writes the current documents to a file
+    # so they are saved and can be loaded next time you start the REPL.
+    docs_file = project.xli_dir / 'docs.txt'
+    names = sorted(name for name, _ in agent.attached_docs)
+    if not names:
+        if docs_file.exists():
+            docs_file.unlink()
+        return
+    with docs_file.open('w') as f:
+        for name in names:
+            f.write(f"{name}\n")
+
+
+def _handle_doc_command(user_input: str, agent, project) -> bool:
     """Handle `/doc` and `/undoc` slash commands.
 
     `/doc`            — list currently-attached docs (in-session state)
@@ -382,6 +475,7 @@ def _handle_doc_command(user_input: str, agent) -> bool:
             return True
         size = len(content)
         agent.attached_docs.append((name, content))
+        save_attached_docs(project, agent)
         warn = ""
         if size > INLINE_SOFT_CAP_BYTES:
             warn = (
@@ -406,6 +500,7 @@ def _handle_doc_command(user_input: str, agent) -> bool:
             console.print(f"[dim]no doc attached named {name!r}[/dim]")
         else:
             console.print(f"[green]✓[/green] detached [cyan]{name}[/cyan]")
+            save_attached_docs(project, agent)
         return True
 
     return False
@@ -499,6 +594,12 @@ PLUGINS (subscribe in REPL via /lib subscribe; invoke via /get <intent>)
   plugin --show ID         Print a plugin's full markdown.
   plugin --edit ID         Edit a plugin in $EDITOR.
   plugin --delete ID       Delete a plugin.
+
+PLUGIN CREDENTIALS (encrypted vault at ~/.config/xli/vault.enc)
+  auth set ID KEY=value    Store secret(s) for a plugin (auto-init on first call).
+  auth list [ID]           List plugins with secrets (or keys for one plugin).
+  auth show ID [--reveal]  Show stored keys (values redacted unless --reveal).
+  auth clear ID [KEY]      Remove a key (or every key for the plugin).
 
 SETUP
   config                   Write a config template to ~/.config/xli/config.json.
@@ -633,15 +734,18 @@ def cmd_scratch(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     cfg = GlobalConfig.load()
-    try:
-        clients = Clients.from_config(cfg)
-    except MissingCredentials as e:
-        console.print(f"[red]{e}[/red]")
-        return 1
     project = ProjectConfig.load(Path(args.path).resolve())
     if not project:
         console.print("[red]not an xli project — run `xli init` first[/red]")
         return 1
+    if project.local_only:
+        clients = None
+    else:
+        try:
+            clients = Clients.from_config(cfg)
+        except MissingCredentials as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
     with console.status("[cyan]syncing project…[/cyan]"):
         stats = sync_project(clients, project, cfg, dry_run=args.dry_run)
     color = "yellow" if args.dry_run else "green"
@@ -1652,8 +1756,34 @@ def cmd_plugin(args: argparse.Namespace) -> int:
     """
     from xli.plugin import (
         Plugin, PLUGINS_DIR, create_plugin, delete_plugin,
-        is_valid_id, list_plugins, open_in_editor as _open_in_editor,
+        install_stock_plugins, is_valid_id, list_plugins,
+        open_in_editor as _open_in_editor,
     )
+
+    if getattr(args, "install_stock", False):
+        installed, skipped = install_stock_plugins(force=args.force)
+        if installed:
+            console.print(
+                f"[green]✓[/green] installed {len(installed)} plugin(s) into "
+                f"[cyan]{PLUGINS_DIR}[/cyan]:"
+            )
+            for pid in installed:
+                console.print(f"  · [cyan]{pid}[/cyan]")
+        if skipped:
+            console.print(
+                f"[dim]skipped {len(skipped)} (already exists; use [/dim]"
+                "[cyan]--force[/cyan][dim] to overwrite): [/dim]"
+                + ", ".join(f"[cyan]{p}[/cyan]" for p in skipped)
+            )
+        if not installed and not skipped:
+            console.print("[dim](no stock plugins shipped in this build)[/dim]")
+        else:
+            console.print(
+                "\n[dim]subscribe in any REPL with [/dim][cyan]/lib subscribe <id>[/cyan]"
+                "[dim]; some plugins need [/dim][cyan]xli auth set <id> KEY=...[/cyan]"
+                "[dim] before they can call.[/dim]"
+            )
+        return 0
 
     if args.list:
         plugins = list_plugins()
@@ -1742,7 +1872,126 @@ def cmd_plugin(args: argparse.Namespace) -> int:
     # No flag → list.
     return cmd_plugin(argparse.Namespace(
         list=True, new=None, edit=None, delete=None, show=None, yes=False,
+        install_stock=False, force=False,
     ))
+
+
+def cmd_auth(args: argparse.Namespace) -> int:
+    """Manage plugin credentials in the encrypted vault.
+
+    The vault lives at ~/.config/xli/vault.enc (Fernet-encrypted JSON).
+    Master key is in the OS keyring by default; falls back to ~/.config/xli/.vault-key
+    or $XLI_VAULT_KEY for headless use. First `xli auth set` provisions a key
+    automatically — no explicit init needed.
+    """
+    from xli.vault import Vault, VaultError, VAULT_FILE
+    from xli.plugin import is_valid_id
+
+    action = getattr(args, "auth_action", None)
+
+    if action == "set":
+        if not is_valid_id(args.plugin):
+            console.print(f"[red]invalid plugin id: {args.plugin!r}[/red]")
+            return 1
+        pairs: list[tuple[str, str]] = []
+        for raw in args.assignments:
+            if "=" not in raw:
+                console.print(f"[red]expected KEY=value, got {raw!r}[/red]")
+                return 1
+            k, _, v = raw.partition("=")
+            k, v = k.strip(), v.strip()
+            if not k:
+                console.print(f"[red]empty key in {raw!r}[/red]")
+                return 1
+            pairs.append((k, v))
+        try:
+            vault = Vault.unlock()
+        except VaultError as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        for k, v in pairs:
+            vault.set(args.plugin, k, v)
+        console.print(
+            f"[green]✓[/green] stored {len(pairs)} secret(s) for "
+            f"[cyan]{args.plugin}[/cyan]  [dim](backend={vault.backend})[/dim]"
+        )
+        return 0
+
+    if action == "list":
+        try:
+            vault = Vault.unlock(create_if_missing=False)
+        except VaultError as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        if args.plugin:
+            keys = vault.list_keys(args.plugin)
+            if not keys:
+                console.print(f"[dim](no secrets stored for {args.plugin!r})[/dim]")
+                return 0
+            console.print(f"[bold]{args.plugin}[/bold]:")
+            for k in keys:
+                console.print(f"  · [cyan]{k}[/cyan]")
+            return 0
+        plugins = vault.list_plugins()
+        if not plugins:
+            console.print(
+                "[dim](vault is empty — store one with [/dim]"
+                "[cyan]xli auth set <plugin> KEY=value[/cyan][dim])[/dim]"
+            )
+            return 0
+        console.print(f"[dim]vault: {VAULT_FILE} · backend={vault.backend}[/dim]")
+        for pid in plugins:
+            keys = vault.list_keys(pid)
+            console.print(f"  [bold cyan]{pid}[/bold cyan]  [dim]({len(keys)} key(s): "
+                          + ", ".join(keys) + ")[/dim]")
+        return 0
+
+    if action == "show":
+        try:
+            vault = Vault.unlock(create_if_missing=False)
+        except VaultError as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        secrets = vault.get(args.plugin)
+        if not secrets:
+            console.print(f"[dim](no secrets stored for {args.plugin!r})[/dim]")
+            return 0
+        console.print(f"[bold]{args.plugin}[/bold]:")
+        for k in sorted(secrets.keys()):
+            v = secrets[k]
+            if args.reveal:
+                shown = v
+            else:
+                # Show length + last 4 chars so the user can spot-check rotation
+                # without exposing full values to a shoulder-surfer.
+                shown = f"[dim]({len(v)} chars, ends …{v[-4:]})[/dim]" if len(v) > 4 else "[dim](short)[/dim]"
+            console.print(f"  [cyan]{k}[/cyan] = {shown}")
+        if not args.reveal:
+            console.print("[dim]use [/dim][cyan]--reveal[/cyan][dim] to print plaintext values[/dim]")
+        return 0
+
+    if action == "clear":
+        try:
+            vault = Vault.unlock(create_if_missing=False)
+        except VaultError as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        if args.key:
+            removed = vault.unset(args.plugin, args.key)
+            if removed:
+                console.print(f"[green]✓[/green] cleared {args.plugin}.{args.key}")
+            else:
+                console.print(f"[dim](nothing to clear for {args.plugin}.{args.key})[/dim]")
+        else:
+            removed = vault.unset(args.plugin)
+            if removed:
+                console.print(f"[green]✓[/green] cleared all secrets for {args.plugin}")
+            else:
+                console.print(f"[dim](no secrets stored for {args.plugin!r})[/dim]")
+        return 0
+
+    console.print("[red]unknown auth action[/red] — try set / list / show / clear")
+    return 1
 
 
 def cmd_doc(args: argparse.Namespace) -> int:
@@ -2105,6 +2354,8 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
         console=console,
         yolo=yolo,
     )
+    load_attached_refs(project, agent)
+    load_attached_docs(project, agent)
 
     history_path = project.xli_dir / "repl_history"
     session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
@@ -2142,9 +2393,9 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             return 0
         if _run_shell_passthrough(user_input, project.project_root):
             continue
-        if _handle_ref_command(user_input, agent):
+        if _handle_ref_command(user_input, agent, project):
             continue
-        if _handle_doc_command(user_input, agent):
+        if _handle_doc_command(user_input, agent, project):
             continue
         if _handle_lib_command(user_input, project):
             continue
@@ -2330,6 +2581,8 @@ def cmd_code(args: argparse.Namespace) -> int:
         console.print(f"[dim]sync: {stats.summary()}[/dim]")
 
     agent = Agent(pool=pool, project=project, cfg=cfg, console=console, yolo=args.yolo)
+    load_attached_refs(project, agent)
+    load_attached_docs(project, agent)
 
     history_path = project.xli_dir / "repl_history"
     session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
@@ -2367,9 +2620,9 @@ def cmd_code(args: argparse.Namespace) -> int:
             return 0
         if _run_shell_passthrough(user_input, project.project_root):
             continue
-        if _handle_ref_command(user_input, agent):
+        if _handle_ref_command(user_input, agent, project):
             continue
-        if _handle_doc_command(user_input, agent):
+        if _handle_doc_command(user_input, agent, project):
             continue
         if _handle_lib_command(user_input, project):
             continue
@@ -2705,8 +2958,39 @@ def main() -> int:
     p_plugin.add_argument("--show", metavar="ID", help="Print a plugin's full markdown")
     p_plugin.add_argument("--edit", metavar="ID", help="Edit a plugin in $EDITOR")
     p_plugin.add_argument("--delete", metavar="ID", help="Delete a plugin")
+    p_plugin.add_argument("--install-stock", action="store_true",
+                          help="Copy the bundled starter pack into ~/.config/xli/plugins/ "
+                               "(skips plugins you already have unless --force)")
+    p_plugin.add_argument("--force", action="store_true",
+                          help="With --install-stock: overwrite plugins you've already installed")
     p_plugin.add_argument("--yes", action="store_true", help="Skip confirmation for --delete")
     p_plugin.set_defaults(func=cmd_plugin)
+
+    p_auth = sub.add_parser(
+        "auth",
+        help="Manage plugin credentials in the encrypted vault (~/.config/xli/vault.enc).",
+    )
+    auth_sub = p_auth.add_subparsers(dest="auth_action", required=True)
+
+    auth_set = auth_sub.add_parser("set", help="Store one or more KEY=value secrets for a plugin.")
+    auth_set.add_argument("plugin", help="Plugin id (must match the plugin's frontmatter id)")
+    auth_set.add_argument("assignments", nargs="+", metavar="KEY=value",
+                          help="One or more KEY=value pairs (e.g. OPENWEATHER_KEY=xxx)")
+    auth_set.set_defaults(func=cmd_auth, auth_action="set")
+
+    auth_list = auth_sub.add_parser("list", help="List plugins with stored secrets, or keys for one plugin.")
+    auth_list.add_argument("plugin", nargs="?", help="If omitted, list all plugins; if given, list keys for that plugin")
+    auth_list.set_defaults(func=cmd_auth, auth_action="list")
+
+    auth_show = auth_sub.add_parser("show", help="Show stored keys for a plugin (values redacted by default).")
+    auth_show.add_argument("plugin", help="Plugin id")
+    auth_show.add_argument("--reveal", action="store_true", help="Print plaintext values instead of redacting")
+    auth_show.set_defaults(func=cmd_auth, auth_action="show")
+
+    auth_clear = auth_sub.add_parser("clear", help="Remove a single key, or every key for a plugin.")
+    auth_clear.add_argument("plugin", help="Plugin id")
+    auth_clear.add_argument("key", nargs="?", help="Specific key to remove (omit to clear all keys for the plugin)")
+    auth_clear.set_defaults(func=cmd_auth, auth_action="clear")
 
     p_doc = sub.add_parser(
         "doc",

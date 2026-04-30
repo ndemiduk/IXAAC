@@ -55,6 +55,10 @@ class Registry:
         return next((e for e in self.entries if e.path == p), None)
 
     def find_by_collection(self, collection_id: str) -> Optional[RegistryEntry]:
+        # Empty collection_id is the sentinel for local-only projects; matching
+        # on it would collide every local-only entry into one registry slot.
+        if not collection_id:
+            return None
         return next((e for e in self.entries if e.collection_id == collection_id), None)
 
     def upsert(self, entry: RegistryEntry) -> None:

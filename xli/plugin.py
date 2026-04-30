@@ -70,6 +70,10 @@ auth_env_vars:
 
 <How to get credentials — link to signup page if free, or set up steps for paid.>
 
+Store the key in the encrypted vault — the bash tool injects it into curl
+calls automatically when this plugin is subscribed and the command references
+the variable:
+
 ```bash
 xli auth set <plugin-id> <ENV_VAR_NAME>=<your-key>
 ```
@@ -261,6 +265,47 @@ def open_in_editor(path: Path) -> int:
         return subprocess.call([editor, str(path)])
     except FileNotFoundError:
         return subprocess.call(["vi", str(path)])
+
+
+# --------------------------------------------------------------------------- #
+#  Stock plugin pack — opt-in seed catalog shipped with the package
+# --------------------------------------------------------------------------- #
+
+def list_stock_plugins() -> list[tuple[str, str]]:
+    """Return [(plugin_id, markdown_content)] for every stock plugin shipped
+    in xli/stock_plugins/. Sorted by id for deterministic install order.
+
+    Read via importlib.resources so this works the same in editable installs
+    and in wheel installs (the .md files are declared as package data in
+    pyproject.toml).
+    """
+    from importlib.resources import files
+    out: list[tuple[str, str]] = []
+    pkg = files("xli.stock_plugins")
+    for entry in sorted(pkg.iterdir(), key=lambda p: p.name):
+        if entry.name.endswith(".md"):
+            out.append((entry.name[:-3], entry.read_text()))
+    return out
+
+
+def install_stock_plugins(*, force: bool = False) -> tuple[list[str], list[str]]:
+    """Copy stock plugins into PLUGINS_DIR. Returns (installed, skipped).
+
+    `force=False` (default) preserves any plugin the user has already edited
+    — only missing plugin ids get written. `force=True` overwrites unconditionally
+    (intended for upgrading the seed pack after the user has installed an old version).
+    """
+    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    installed: list[str] = []
+    skipped: list[str] = []
+    for pid, content in list_stock_plugins():
+        dest = PLUGINS_DIR / f"{pid}.md"
+        if dest.exists() and not force:
+            skipped.append(pid)
+            continue
+        dest.write_text(content)
+        installed.append(pid)
+    return (installed, skipped)
 
 
 # --------------------------------------------------------------------------- #

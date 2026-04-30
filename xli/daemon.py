@@ -430,7 +430,18 @@ class CommandDaemon(ClientXMPP):
                 "body": (body or "")[:500],
                 "status": status,
             })
-            with self.cfg.audit_log.open("a") as f:
+            # Plaintext OMEMO message bodies land here, so own-only perms.
+            # O_CREAT honours umask, so chmod after open to force 0o600.
+            fd = os.open(
+                self.cfg.audit_log,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o600,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
+            with os.fdopen(fd, "a") as f:
                 f.write(line + "\n")
         except Exception:
             logging.exception("audit log write failed")
