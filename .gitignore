@@ -1,0 +1,16 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.log
+README.md
+
+# Local working stuff
+.claude/
+.xli/
+proposals/
+test/
+iXaac.code-workspace

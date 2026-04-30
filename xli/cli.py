@@ -49,6 +49,7 @@ from xli.persona import (
 )
 from xli.pool import ClientPool
 from xli.registry import REGISTRY_FILE, Registry
+from xli import workspaces as ws_mod
 from xli.sync import init_project, sync_project
 from xli.transcript import (
     clear_turns,
@@ -914,6 +915,92 @@ def cmd_projects(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_workspaces(args: argparse.Namespace) -> int:
+    """List/manage iXaac workspaces (project + snapshot directories).
+
+    Workspaces is a broader registry than `xli projects` — it tracks every
+    directory xli has been invoked in, plus any directory the user explicitly
+    registers (e.g. archived references). The XMPP daemon (Phase 2) reads it
+    to know where to dispatch agent runs.
+    """
+    action = getattr(args, "ws_action", None) or "list"
+
+    if action == "list":
+        ws = ws_mod.Workspaces.load()
+        entries = ws.entries
+        if getattr(args, "projects_only", False):
+            entries = [e for e in entries if e.kind == ws_mod.KIND_PROJECT]
+        if getattr(args, "snapshots_only", False):
+            entries = [e for e in entries if e.kind == ws_mod.KIND_SNAPSHOT]
+        if not entries:
+            console.print(
+                "[yellow]no workspaces yet — run `xli` in a project dir, or "
+                "`xli workspaces add <path>`[/yellow]"
+            )
+            return 0
+        entries = sorted(entries, key=lambda e: e.last_active, reverse=True)
+        console.print("[bold]xli workspaces:[/bold] (most-recent first)")
+        for e in entries:
+            kind_marker = (
+                "[green]●[/green]" if e.kind == ws_mod.KIND_PROJECT
+                else "[yellow]○[/yellow]"
+            )
+            alias_str = f"[bold cyan]{e.alias}[/bold cyan]" if e.alias else "[dim]—[/dim]"
+            console.print(
+                f"  {kind_marker} {alias_str:<25} {e.path:<50} "
+                f"[dim]last: {e.last_active[:19]}[/dim]"
+            )
+            if e.notes:
+                console.print(f"      [dim italic]{e.notes}[/dim italic]")
+        return 0
+
+    if action == "add":
+        try:
+            entry = ws_mod.add(
+                args.path,
+                kind=ws_mod.KIND_SNAPSHOT if args.snapshot else ws_mod.KIND_PROJECT,
+                alias=args.alias,
+                notes=args.notes,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        suffix = f" (alias: [bold]{entry.alias}[/bold])" if entry.alias else ""
+        console.print(f"[green]added[/green] {entry.path} as [bold]{entry.kind}[/bold]{suffix}")
+        return 0
+
+    if action in ("snapshot", "project"):
+        try:
+            entry = ws_mod.set_kind(args.key, action)
+        except (KeyError, ValueError) as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        console.print(f"[green]marked {action}:[/green] {entry.path}")
+        return 0
+
+    if action == "alias":
+        try:
+            entry = ws_mod.set_alias(args.key, args.alias)
+        except KeyError as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+        if args.alias:
+            console.print(f"[green]aliased[/green] {entry.path} as [bold]{args.alias}[/bold]")
+        else:
+            console.print(f"[green]cleared alias[/green] for {entry.path}")
+        return 0
+
+    if action == "remove":
+        if ws_mod.remove(args.key):
+            console.print(f"[green]removed:[/green] {args.key}")
+            return 0
+        console.print(f"[red]not found:[/red] {args.key}")
+        return 1
+
+    console.print(f"[red]unknown workspaces action:[/red] {action}")
+    return 2
+
+
 def cmd_keys(args: argparse.Namespace) -> int:
     """Manage chat keys: list / rotate / expire / revoke."""
     cfg = GlobalConfig.load()
@@ -1741,6 +1828,104 @@ def cmd_doc(args: argparse.Namespace) -> int:
     return cmd_doc(argparse.Namespace(list=True, new=None, edit=None, delete=None, yes=False))
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    """One-shot agent run for non-interactive callers (e.g. the XMPP daemon).
+
+    Resolves --workspace (alias or path) to a registered ProjectConfig, runs a
+    single Agent.run_turn against the given prompt, and prints the reply to
+    stdout. Used by `xli daemon` for the "agent fallback" dispatch when an
+    incoming XMPP message doesn't match a verb.
+    """
+    cfg = GlobalConfig.load()
+    try:
+        pool = ClientPool.from_config(cfg)
+    except MissingCredentials as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    workspace_arg = (args.workspace or "").strip()
+    if workspace_arg:
+        ws = ws_mod.Workspaces.load()
+        entry = ws.find(workspace_arg)
+        path = Path(entry.path) if entry else Path(workspace_arg).expanduser().resolve()
+    else:
+        ws = ws_mod.Workspaces.load()
+        most_recent = ws.most_recent_project()
+        if not most_recent:
+            print(
+                "error: no project workspaces registered; pass --workspace explicitly",
+                file=sys.stderr,
+            )
+            return 1
+        path = Path(most_recent.path)
+
+    project = ProjectConfig.load(path)
+    if not project:
+        print(
+            f"error: not an xli project: {path}\n"
+            f"hint: cd into it and run `xli init` first",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not project.local_only:
+        try:
+            sync_project(pool.primary(), project, cfg)
+        except Exception as e:
+            print(f"warning: pre-run sync failed: {e}", file=sys.stderr)
+
+    agent = Agent(pool=pool, project=project, cfg=cfg, console=console, yolo=False)
+    try:
+        reply, _modified, _stats = agent.run_turn(args.prompt)
+    except Exception as e:
+        print(f"error: agent run failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+
+    print(reply)
+    return 0
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    """Start the XMPP command daemon (Phase 2 inbound listener).
+
+    The daemon needs slixmpp + slixmpp-omemo, which live in the dedicated
+    OMEMO venv at ~/.config/xli/bin/venv/ (see plugin doc xmpp_send.md).
+    Re-exec through that venv's Python so the daemon module's imports
+    succeed without polluting iXaac's own venv.
+    """
+    import os as _os
+
+    if not args.xmpp:
+        console.print("[red]--xmpp is currently the only supported transport[/red]")
+        return 1
+
+    omemo_python = Path.home() / ".config" / "xli" / "bin" / "venv" / "bin" / "python3"
+    if not omemo_python.exists():
+        console.print(
+            f"[red]OMEMO venv not found at {omemo_python}[/red]\n"
+            "[dim]see ~/.config/xli/plugins/xmpp_send.md → 'Sender install' for setup[/dim]"
+        )
+        return 1
+
+    daemon_script = Path(__file__).parent / "daemon.py"
+    if not daemon_script.exists():
+        console.print(f"[red]daemon module missing at {daemon_script}[/red]")
+        return 1
+
+    config_path = (
+        Path(args.config).expanduser()
+        if args.config
+        else Path.home() / ".config" / "xli" / "daemon.toml"
+    )
+
+    argv = [str(omemo_python), str(daemon_script), str(config_path)]
+    # execv replaces this process so the user sees the daemon's logs directly;
+    # Ctrl-C drops them straight into the daemon's signal handling.
+    _os.execv(argv[0], argv)
+    # unreachable
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Persona-based conversational agent with persistent memory.
 
@@ -2376,6 +2561,45 @@ def main() -> int:
     p_projects.add_argument("filter", nargs="?", help="Optional substring filter (matches name or path)")
     p_projects.set_defaults(func=cmd_projects)
 
+    p_ws = sub.add_parser(
+        "workspaces",
+        help="List/manage workspaces (auto-tracked directories + explicit references).",
+    )
+    p_ws.set_defaults(func=cmd_workspaces, ws_action=None)
+    ws_sub = p_ws.add_subparsers(dest="ws_action")
+
+    ws_list = ws_sub.add_parser("list", help="List workspaces, sorted by last_active (default action).")
+    ws_list.add_argument("--projects", dest="projects_only", action="store_true",
+                         help="Show only kind=project")
+    ws_list.add_argument("--snapshots", dest="snapshots_only", action="store_true",
+                         help="Show only kind=snapshot")
+    ws_list.set_defaults(func=cmd_workspaces, ws_action="list")
+
+    ws_add = ws_sub.add_parser("add", help="Register a directory as a workspace.")
+    ws_add.add_argument("path", help="Directory path to register")
+    ws_add.add_argument("--snapshot", action="store_true",
+                        help="Mark as snapshot (read-only reference, excluded from default rotation)")
+    ws_add.add_argument("--alias", help="Optional short alias for daemon dispatch (e.g. ixaac, isaac2)")
+    ws_add.add_argument("--notes", help="Optional notes")
+    ws_add.set_defaults(func=cmd_workspaces, ws_action="add")
+
+    ws_snap = ws_sub.add_parser("snapshot", help="Mark a workspace as snapshot.")
+    ws_snap.add_argument("key", help="Path or alias")
+    ws_snap.set_defaults(func=cmd_workspaces, ws_action="snapshot")
+
+    ws_proj = ws_sub.add_parser("project", help="Mark a workspace as project (active).")
+    ws_proj.add_argument("key", help="Path or alias")
+    ws_proj.set_defaults(func=cmd_workspaces, ws_action="project")
+
+    ws_alias = ws_sub.add_parser("alias", help="Set or clear a workspace alias.")
+    ws_alias.add_argument("key", help="Path or current alias")
+    ws_alias.add_argument("alias", nargs="?", help="New alias (omit to clear)")
+    ws_alias.set_defaults(func=cmd_workspaces, ws_action="alias")
+
+    ws_rm = ws_sub.add_parser("remove", help="Forget about a workspace.")
+    ws_rm.add_argument("key", help="Path or alias")
+    ws_rm.set_defaults(func=cmd_workspaces, ws_action="remove")
+
     p_sync = sub.add_parser("sync", help="Push local changes to the project's collection.")
     p_sync.add_argument("path", nargs="?", default=".")
     p_sync.add_argument("--dry-run", action="store_true")
@@ -2505,10 +2729,45 @@ def main() -> int:
     p_scratch.add_argument("--force", action="store_true", help="Re-init even if scratch with this name exists")
     p_scratch.set_defaults(func=cmd_scratch)
 
+    p_ask = sub.add_parser(
+        "ask",
+        help="One-shot agent run (non-interactive). Used by the XMPP daemon for fallback dispatch.",
+    )
+    p_ask.add_argument(
+        "--workspace",
+        help="Workspace alias or path (default: most-recently-active project from registry)",
+    )
+    p_ask.add_argument("prompt", help="The user message to feed the agent")
+    p_ask.set_defaults(func=cmd_ask)
+
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="Run the inbound XMPP command daemon (listens for OMEMO DMs, dispatches to verbs/agent).",
+    )
+    p_daemon.add_argument("--xmpp", action="store_true", required=True,
+                          help="Use the XMPP transport (currently the only one)")
+    p_daemon.add_argument("--config", help="Path to daemon.toml (default: ~/.config/xli/daemon.toml)")
+    p_daemon.set_defaults(func=cmd_daemon)
+
     p_help = sub.add_parser("help", help="Show grouped command listing.")
     p_help.set_defaults(func=cmd_help)
 
     args = p.parse_args()
+
+    # Auto-touch the cwd as a workspace, so the registry keeps an honest
+    # last_active timeline for every dir xli has run in. Skip stateless
+    # commands (config/setup/keys/etc.) and the workspaces command itself
+    # (`xli workspaces` is a registry inspection, not a workspace activity).
+    _STATELESS_COMMANDS = {
+        "help", "config", "setup", "models", "keys", "bootstrap",
+        "gc", "workspaces", "ask", "daemon",
+    }
+    if args.command not in _STATELESS_COMMANDS:
+        try:
+            ws_mod.touch(Path.cwd())
+        except Exception:
+            pass  # touching is best-effort; never block the actual command
+
     return args.func(args) or 0
 
 
