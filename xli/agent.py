@@ -176,12 +176,30 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
 
 
 PLAN_MODE_PREAMBLE = """[PLAN MODE ACTIVE]
-You cannot modify anything in this turn. Your tools are read-only: read_file, list_dir, glob, grep, search_project. No write_file, no edit_file, no bash, no dispatch_subagent.
+You cannot modify project content in this turn. Your tools are read-only investigation (read_file, list_dir, glob, grep, search_project, web_search, x_search, plugin_search, plugin_get) plus one scoped write tool: plan_note. No write_file, no edit_file, no bash, no dispatch_subagent.
+
+plan_note appends to a scratchpad at .xli/plan-notes.md that survives across iterations and across /exit. USE IT. Capture intermediate findings as you go: files you've checked, things you've ruled out, open questions, partial conclusions. If this turn hits the iteration cap, future-you will resume from those notes — without them, all your investigation evaporates.
 
 Investigate as needed, then output a numbered, concrete plan describing exactly what changes you would make and why. The user will review and either approve, refine, or cancel before any change happens.
-
-User's request:
 """
+
+PLAN_MODE_NOTES_HEADER = "\n\n## Your scratchpad so far (.xli/plan-notes.md)\n\n"
+PLAN_MODE_NOTES_EMPTY = "(empty — first plan_note call will create it)"
+PLAN_MODE_USER_HEADER = "\n\nUser's request:\n"
+
+
+def _read_plan_notes(project) -> str:
+    """Load .xli/plan-notes.md content for injection into the plan-mode preamble.
+    Returns the empty-state placeholder if missing or unreadable.
+    """
+    notes_path = project.xli_dir / "plan-notes.md"
+    if not notes_path.exists():
+        return PLAN_MODE_NOTES_EMPTY
+    try:
+        content = notes_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return PLAN_MODE_NOTES_EMPTY
+    return content or PLAN_MODE_NOTES_EMPTY
 
 
 @dataclass
@@ -496,7 +514,12 @@ class Agent:
             self.history[0] = {"role": "system", "content": self._effective_system_prompt()}
 
         if self.plan_mode:
-            user_message = PLAN_MODE_PREAMBLE + user_message
+            notes = _read_plan_notes(self.project)
+            user_message = (
+                PLAN_MODE_PREAMBLE
+                + PLAN_MODE_NOTES_HEADER + notes
+                + PLAN_MODE_USER_HEADER + user_message
+            )
             schemas = plan_mode_schemas()
         else:
             schemas = tool_schemas() + [dispatch_subagent_schema()]
@@ -606,7 +629,7 @@ class Agent:
     ) -> tuple[Any, Any, bool]:
         """One orchestrator chat-completions call, streamed.
 
-        Streams content deltas live to the terminal. Tool-call deltas are
+        Streams content deltas as plain text live, snaps to Markdown at end. Tool-call deltas are
         accumulated silently — the user sees discrete tool events (with
         previews) in the next phase. Returns (msg, usage, streamed_text)
         in the same shape the non-streaming code expects:
@@ -663,19 +686,17 @@ class Agent:
                         # nothing visible from this helper.
                         self.console.print()
                         live = Live(
-                            Markdown(""),
+                            "",
                             console=self.console,
                             refresh_per_second=10,
                             vertical_overflow="visible",
                         )
                         live.start()
                         streamed_any = True
-                    # Treat delta.content as cumulative (full text so far) to fix repetition bug.
-                    current_content = delta.content
-                    # Re-render the full buffer through Markdown so styling
-                    # converges as text accumulates. Cheap enough at 10 fps
-                    # for responses up to a few thousand tokens.
-                    live.update(Markdown(current_content))
+                    # Accumulate incremental delta.content to build full text.
+                    current_content += delta.content
+                    # Update with plain text for smooth streaming without re-renders.
+                    live.update(current_content)
 
                 if getattr(delta, "tool_calls", None):
                     for tcd in delta.tool_calls:
@@ -692,13 +713,19 @@ class Agent:
                             if getattr(fn, "arguments", None):
                                 buf["arguments"] += fn.arguments
         finally:
-            if live is not None:
-                live.stop()
+            pass  # Live will be stopped after final update
+
+        # Snap to Markdown for final formatting if content was streamed.
+        if streamed_any and current_content and live is not None:
+            live.update(Markdown(current_content))
+            live.stop()
+        elif live is not None:
+            live.stop()
 
         # If a reasoning model produced thinking tokens but no actual content
         # and no tool_calls, the user would see nothing — surface the
         # reasoning so the failure mode is diagnostic rather than silent.
-        if reasoning_parts and not content_parts and not tool_buf:
+        if reasoning_parts and not current_content and not tool_buf:
             from rich.markdown import Markdown as _Markdown
             from rich.panel import Panel
             reasoning_text = "".join(reasoning_parts).strip()

@@ -486,6 +486,35 @@ def t_search_project(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     return ToolResult(_truncate("\n\n---\n\n".join(out)))
 
 
+# Filename for the plan-mode scratchpad — lives under <project>/.xli/.
+# Append-only via t_plan_note. Auto-loaded into the plan-mode preamble at
+# every iteration so the planner stays coherent across long investigations
+# and survives /exit + max-iter aborts.
+PLAN_NOTES_FILENAME = "plan-notes.md"
+PLANS_ARCHIVE_DIR = "plans"
+
+
+def t_plan_note(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Append a timestamped note to the plan-mode scratchpad.
+
+    Hard-scoped: the path is fixed (<project>/.xli/plan-notes.md), there is
+    no path argument, no edit, no delete. Append-only is load-bearing — it
+    means the planner cannot accidentally clobber its own earlier notes.
+    """
+    from datetime import datetime, timezone
+    text = (args.get("text") or "").strip()
+    if not text:
+        return ToolResult("plan_note: 'text' is required", is_error=True)
+    notes_path = ctx.project.xli_dir / PLAN_NOTES_FILENAME
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    block = f"\n## {ts}\n\n{text}\n"
+    with notes_path.open("a", encoding="utf-8") as f:
+        f.write(block)
+    line_count = sum(1 for _ in notes_path.open("r", encoding="utf-8"))
+    return ToolResult(f"noted ({line_count} lines in plan-notes.md)")
+
+
 # --------------------------------------------------------------------------- #
 #  Tool registry + JSON schema for tool-use
 # --------------------------------------------------------------------------- #
@@ -506,6 +535,7 @@ REGISTRY: dict[str, ToolFn] = {
     "code_execute": t_code_execute,
     "plugin_search": t_plugin_search,
     "plugin_get": t_plugin_get,
+    "plan_note": t_plan_note,
 }
 
 # Workers are read-only investigators: same toolset minus mutation + no swarm.
@@ -532,8 +562,13 @@ PARALLEL_SAFE: set[str] = {
     "dispatch_subagent",
 }
 
-# Tools available in PLAN MODE — strictly read-only, no shell, no fan-out.
-# Bash and dispatch_subagent are excluded because both can mutate state.
+# Tools available in PLAN MODE.
+#
+# Refined invariant: plan mode cannot mutate project content but may write to
+# iXaac's own working files. Concretely: every tool here is either read-only
+# OR is the scoped scratchpad (plan_note), which can only append to a fixed
+# path under .xli/. Bash, dispatch_subagent, write_file, edit_file all stay
+# excluded — they can touch project content.
 PLAN_MODE_TOOLS: set[str] = {
     "read_file",
     "list_dir",
@@ -544,6 +579,7 @@ PLAN_MODE_TOOLS: set[str] = {
     "x_search",
     "plugin_search",
     "plugin_get",
+    "plan_note",
 }
 
 
@@ -789,6 +825,32 @@ def tool_schemas() -> list[dict]:
                         "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
                     },
                     "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plan_note",
+                "description": (
+                    "PLAN-MODE ONLY. Append a free-form note to your scratchpad at "
+                    ".xli/plan-notes.md. The scratchpad survives across iterations and "
+                    "across /exit, so future turns (including after a max-iteration "
+                    "abort) can resume from your prior findings. Use it liberally to "
+                    "capture: files you've checked, things you've ruled out, open "
+                    "questions, partial conclusions. Append-only — you cannot edit or "
+                    "delete prior notes, so if you change your mind, append a "
+                    "correction rather than trying to overwrite."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "The note text to append. A timestamp is added automatically.",
+                        },
+                    },
+                    "required": ["text"],
                 },
             },
         },

@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
-from prompt_toolkit import PromptSession
+from prompt_toolkit import PromptSession, prompt
+from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.panel import Panel
@@ -302,6 +304,28 @@ def _attachment_tag(agent) -> str:
         oversized = any(len(c) > INLINE_SOFT_CAP_BYTES for _, c in agent.attached_docs)
         parts.append(f"{len(agent.attached_docs)}d" + ("!" if oversized else ""))
     return ("+" + "/".join(parts)) if parts else ""
+
+
+def _archive_plan_notes(project: ProjectConfig, *, label: str) -> Optional[Path]:
+    """Move .xli/plan-notes.md to .xli/plans/<label>-<timestamp>.md.
+
+    Called on /execute (label='approved'), /cancel (label='cancelled'), and
+    when the user opts not to resume an existing scratchpad on /plan
+    (label='abandoned'). Returns the archived path, or None if no notes
+    existed to archive.
+    """
+    from datetime import datetime, timezone
+    notes_path = project.xli_dir / "plan-notes.md"
+    if not notes_path.exists() or notes_path.stat().st_size == 0:
+        if notes_path.exists():
+            notes_path.unlink()  # empty file leftover, just clean it up
+        return None
+    archive_dir = project.xli_dir / "plans"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H-%M-%S")
+    dest = archive_dir / f"{label}-{ts}.md"
+    notes_path.rename(dest)
+    return dest
 
 
 def load_attached_refs(project: ProjectConfig, agent: Agent) -> None:
@@ -1790,7 +1814,7 @@ def cmd_plugin(args: argparse.Namespace) -> int:
         if not plugins:
             console.print(
                 "[dim](no plugins yet — create one with [/dim]"
-                "[cyan]xli plugin --new <id>[/cyan][dim])[/dim]"
+                "[cyan]xli plugin --add <id>[/cyan][dim])[/dim]"
             )
             return 0
         console.print("[dim]id (use this with /lib subscribe) · risk · categories · description[/dim]")
@@ -1871,9 +1895,99 @@ def cmd_plugin(args: argparse.Namespace) -> int:
 
     # No flag → list.
     return cmd_plugin(argparse.Namespace(
-        list=True, new=None, edit=None, delete=None, show=None, yes=False,
+        list=True, new=None, add=None, edit=None, delete=None, show=None, yes=False,
         install_stock=False, force=False,
     ))
+
+
+def cmd_plugin_add(plugin_id: str) -> int:
+    """Interactively create a new plugin."""
+    from xli.plugin import Plugin, create_plugin, is_valid_id
+
+    if not is_valid_id(plugin_id):
+        console.print(f"[red]invalid plugin id: {plugin_id!r}[/red]")
+        return 1
+    p = Plugin(id=plugin_id)
+    if p.exists():
+        console.print(f"[yellow]plugin {plugin_id!r} already exists[/yellow] — use --edit instead")
+        return 1
+
+    # Prompt for details
+    name = prompt("Display name: ", default=plugin_id.title())
+    description = prompt("One-line description: ")
+    categories = prompt("Categories (comma-separated, e.g. misc,api): ", default="misc")
+    risk_completer = WordCompleter(["low", "medium", "high"])
+    risk = prompt("Risk level (low/medium/high): ", default="low", completer=risk_completer)
+    auth_type = prompt("Auth type (none/query_param/header/bearer): ", default="none")
+    auth_env_vars = []
+    if auth_type != "none":
+        env_vars = prompt("Auth env vars (comma-separated, e.g. API_KEY,SECRET): ")
+        auth_env_vars = [v.strip() for v in env_vars.split(",") if v.strip()]
+
+    # Generate frontmatter
+    frontmatter = f"""---
+id: {plugin_id}
+name: {name}
+description: {description}
+categories: [{categories}]
+risk: {risk}
+auth_type: {auth_type}"""
+    if auth_env_vars:
+        frontmatter += f"\nauth_env_vars:\n" + "\n".join(f"  - {v}" for v in auth_env_vars)
+    frontmatter += "\n---\n\n"
+
+    # Body template
+    body = f"""# {name}
+
+{description}
+
+## Auth setup
+
+"""
+    if auth_type == "none":
+        body += "No authentication required.\n"
+    else:
+        body += f"""Store the key in the encrypted vault — the bash tool injects it into curl
+calls automatically when this plugin is subscribed and the command references
+the variable:
+
+```bash
+xli auth set {plugin_id} {' '.join(f'{v}=<your-{v.lower()}>' for v in auth_env_vars)}
+```
+
+## Usage
+
+### Action 1 — short verb describing what this call does
+
+```bash
+curl "https://api.example.com/v1/endpoint?param={{PARAM}}"
+```
+"""
+        if auth_env_vars:
+            body += f""" \\
+  -H "Authorization: Bearer ${{{auth_env_vars[0]}}}" """
+        body += """
+
+Parameters:
+- `PARAM`: <what the agent should fill in here>
+
+## Response shape
+
+<JSON / XML / etc., briefly. Link to upstream docs for full schema.>
+
+## Cost / rate limits
+
+<Free tier: N requests/min. Paid: $X/M calls. Etc.>
+"""
+
+    content = frontmatter + body
+    create_plugin(plugin_id, content=content)
+    console.print(f"[green]✓[/green] created plugin [bold]{plugin_id}[/bold] at {p.path}")
+    console.print(
+        "[dim]ready. From any project REPL, [/dim]"
+        f"[cyan]/lib subscribe {plugin_id}[/cyan][dim] to make it available there.[/dim]"
+    )
+    return 0
 
 
 def cmd_auth(args: argparse.Namespace) -> int:
@@ -2733,6 +2847,26 @@ def cmd_code(args: argparse.Namespace) -> int:
             continue
         if user_input == "/plan":
             agent.plan_mode = True
+            notes_path = project.xli_dir / "plan-notes.md"
+            if notes_path.exists() and notes_path.stat().st_size > 0:
+                line_count = sum(1 for _ in notes_path.open(encoding="utf-8"))
+                age_seconds = int(time.time() - notes_path.stat().st_mtime)
+                age_str = (
+                    f"{age_seconds // 3600}h {age_seconds % 3600 // 60}m"
+                    if age_seconds >= 3600 else f"{age_seconds // 60}m"
+                )
+                console.print(
+                    f"[dim]found existing plan-notes.md ({line_count} lines, "
+                    f"last modified {age_str} ago)[/dim]"
+                )
+                try:
+                    ans = input("  resume from prior notes? [Y/n] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    ans = "y"
+                if ans == "n":
+                    archived = _archive_plan_notes(project, label="abandoned")
+                    if archived:
+                        console.print(f"[dim]archived to {archived.relative_to(project.project_root)}[/dim]")
             console.print(
                 "[yellow]plan mode ON[/yellow] — next turn will investigate read-only and produce a plan. "
                 "/execute to approve, /cancel to drop."
@@ -2741,7 +2875,14 @@ def cmd_code(args: argparse.Namespace) -> int:
         if user_input == "/cancel":
             if agent.plan_mode:
                 agent.plan_mode = False
-                console.print("[dim]plan mode off[/dim]")
+                archived = _archive_plan_notes(project, label="cancelled")
+                if archived:
+                    console.print(
+                        f"[dim]plan mode off — notes archived to "
+                        f"{archived.relative_to(project.project_root)}[/dim]"
+                    )
+                else:
+                    console.print("[dim]plan mode off[/dim]")
             else:
                 console.print("[dim](not in plan mode)[/dim]")
             continue
@@ -2766,8 +2907,33 @@ def cmd_code(args: argparse.Namespace) -> int:
                 console.print("[dim](not in plan mode — nothing to execute)[/dim]")
                 continue
             agent.plan_mode = False
-            console.print("[green]plan approved — executing[/green]")
+            archived = _archive_plan_notes(project, label="approved")
             user_input = "Approved. Execute the plan above using all available tools."
+            if archived:
+                # Feed the full investigation notes into the execute-phase
+                # context so the agent has the rationale, not just the bullet
+                # points from chat history. Truncate if oversized to bound
+                # per-iteration context bloat.
+                try:
+                    notes = archived.read_text(encoding="utf-8")
+                except OSError:
+                    notes = ""
+                if notes:
+                    MAX_NOTES = 30_000
+                    if len(notes) > MAX_NOTES:
+                        notes = notes[-MAX_NOTES:]
+                        notes = "[…truncated to last 30KB…]\n" + notes
+                    user_input += (
+                        f"\n\nYour plan-mode investigation notes "
+                        f"(archived to {archived.relative_to(project.project_root)}):\n\n"
+                        + notes
+                    )
+                console.print(
+                    f"[green]plan approved — executing[/green] "
+                    f"[dim](notes archived to {archived.relative_to(project.project_root)})[/dim]"
+                )
+            else:
+                console.print("[green]plan approved — executing[/green]")
 
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
@@ -2954,6 +3120,7 @@ def main() -> int:
         help="Manage plugins (markdown API descriptors used via /lib + /get).",
     )
     p_plugin.add_argument("--new", metavar="ID", help="Create a new plugin from template; opens $EDITOR")
+    p_plugin.add_argument("--add", metavar="ID", help="Interactively create a new plugin")
     p_plugin.add_argument("--list", action="store_true", help="List all installed plugins")
     p_plugin.add_argument("--show", metavar="ID", help="Print a plugin's full markdown")
     p_plugin.add_argument("--edit", metavar="ID", help="Edit a plugin in $EDITOR")
