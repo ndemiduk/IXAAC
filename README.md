@@ -1,6 +1,6 @@
-# IXAAC
+# iXaac
 
-*Internal name: `xli` (the binary, the package, the on-disk directory). User-facing brand: **IXAAC**. The codebase still uses `xli` everywhere because renaming internal references is churn for no benefit. Every command in this README starts with `xli` — that's what you type.*
+*Internal name: `xli` (the binary, the package, the on-disk directory). User-facing brand: **iXaac**. The codebase still uses `xli` everywhere because renaming internal references is churn for no benefit. Every command in this README starts with `xli` — that's what you type.*
 
 A **personal AI substrate** — not a coding agent, not a chatbot, not an MCP-style platform. A terminal program built on **xAI's Grok** and **xAI Collections** that grows with what you curate: personas, reference docs, API plugins, multi-machine fabric. The model and primitives are commodities; **your curation is the load-bearing layer.**
 
@@ -17,7 +17,7 @@ There's a category gap in the AI tooling landscape:
 - **Frameworks like LangChain** are developer toolkits to *build* one product. Not a shell you live in.
 - **Self-hosted RAG apps (Khoj, MemGPT)** focus on memory. Usually one machine, one purpose.
 
-IXAAC sits in the unoccupied gap: **a substrate that rewards investment**. Like Emacs, but for AI tooling. You write a few personas, a few reference docs, a few plugins for APIs you actually use, and the system becomes uniquely yours. Power users will love it; casual users will bounce — and that's fine.
+iXaac sits in the unoccupied gap: **a substrate that rewards investment**. Like Emacs, but for AI tooling. You write a few personas, a few reference docs, a few plugins for APIs you actually use, and the system becomes uniquely yours. Power users will love it; casual users will bounce — and that's fine.
 
 The thesis in one sentence:
 
@@ -58,7 +58,7 @@ The thesis in one sentence:
   - At least one team you have admin access to (auto-discovered)
 - `openai>=1.50` recommended (server-tool calls use the Responses API)
 
-You do **not** need to manually create chat API keys — IXAAC provisions them for you.
+You do **not** need to manually create chat API keys — iXaac provisions them for you.
 
 ---
 
@@ -87,7 +87,7 @@ sudo ln -s "$(pwd)/venv/bin/xli" /usr/local/bin/xli
 export XAI_MANAGEMENT_API_KEY=xai-...your-management-key...
 ```
 
-(Add to your shell rc.) The management key is the **only** privileged credential — it can create, rotate, and revoke other API keys, and it manages your collections. **Never stored on disk by IXAAC.**
+(Add to your shell rc.) The management key is the **only** privileged credential — it can create, rotate, and revoke other API keys, and it manages your collections. **Never stored on disk by iXaac.**
 
 ### 2. Run `xli setup`
 
@@ -115,7 +115,7 @@ Edit `~/.config/xli/config.json` and add `pricing` with USD-per-million-token ra
 }
 ```
 
-Without `pricing`, token counts still display; cost numbers are simply omitted (IXAAC never fabricates a price).
+Without `pricing`, token counts still display; cost numbers are simply omitted (iXaac never fabricates a price).
 
 ### 4. Verify
 
@@ -541,7 +541,7 @@ The default ignore list is aggressive: `.git/`, `.xli/`, `venv/`, `.venv/`, `nod
 
 Orchestrator chat completions stream via `stream=True`. Content deltas render through a `rich.Live` widget that re-renders Markdown progressively (headers, bold, code blocks, lists). Tool calls stream silently — they materialize as discrete `→ tool_name` events with green/red badges and dimmed result previews. The user sees both the answer flowing AND the work happening.
 
-**Reasoning model handling:** xAI's reasoning models (e.g. `grok-4.20-reasoning`) emit `delta.reasoning_content` separately from `delta.content`. IXAAC captures both — reasoning is treated as private thinking and not displayed unless the model produced reasoning but no final content (then a yellow panel surfaces the reasoning so the failure mode is diagnostic rather than silent).
+**Reasoning model handling:** xAI's reasoning models (e.g. `grok-4.20-reasoning`) emit `delta.reasoning_content` separately from `delta.content`. iXaac captures both — reasoning is treated as private thinking and not displayed unless the model produced reasoning but no final content (then a yellow panel surfaces the reasoning so the failure mode is diagnostic rather than silent).
 
 ### Multi-key swarm
 
@@ -771,7 +771,7 @@ The model claimed work without using any tools — likely a hallucination. Verif
 
 ### Reasoning model produces no answer
 
-xAI's reasoning models can sometimes "think" through a problem and fail to emit a final answer. IXAAC now surfaces the reasoning in a yellow panel when this happens (so you see what it was thinking). Workarounds:
+xAI's reasoning models can sometimes "think" through a problem and fail to emit a final answer. iXaac now surfaces the reasoning in a yellow panel when this happens (so you see what it was thinking). Workarounds:
 - Rephrase the question
 - Switch to a non-reasoning model (`xli models set --orchestrator grok-4`)
 - The reasoning panel often shows what got the model stuck
@@ -850,20 +850,20 @@ Reasoning models like `grok-4.20-reasoning` can rationalize past system-prompt r
 - Refs cross-pollinate them.
 - xAI provides Grok + Collections + server tools; **the user composes the system from there**.
 
-This is the inverse of Claude Code / Codex / Cursor, which assume "vendor provides capability, user provides project files." IXAAC assumes "vendor provides primitives, user composes the system."
+This is the inverse of Claude Code / Codex / Cursor, which assume "vendor provides capability, user provides project files." iXaac assumes "vendor provides primitives, user composes the system."
 
 ### What this means in practice
 
 - **Plugins are markdown files the user writes** (or imports), not vendor-curated tools. Authoring friction matters more than feature breadth — the wizard (when shipped) is core, not a nice-to-have.
 - **Personas are user-defined personalities with their own indexed memory.** Each is a real Collection.
 - **Multi-machine is native.** Phone-at-work talks to desktop-at-home via XMPP daemon (when shipped). Not a hack.
-- **Self-managing credentials.** Auto-provision, auto-expire, auto-rotate. User isn't asked to "bring an API key"; IXAAC mints them.
+- **Self-managing credentials.** Auto-provision, auto-expire, auto-rotate. User isn't asked to "bring an API key"; iXaac mints them.
 - **The agent fights its own model's hallucinations.** Yellow warning when claimed work doesn't match tool calls. Structurally suspicious.
 - **Reasoning models are tools for thinking, not following directions.** Document the trade-off; let users pick the right model for the job.
 
 ### Closest spiritual ancestor
 
-**Emacs.** Not a finished product, a substrate that rewards investment. Power users build their own personal computing environment over years. The platform's job is to provide composable primitives; the user's job is to compose. **IXAAC is heading toward Emacs-shape but for AI tooling.**
+**Emacs.** Not a finished product, a substrate that rewards investment. Power users build their own personal computing environment over years. The platform's job is to provide composable primitives; the user's job is to compose. **iXaac is heading toward Emacs-shape but for AI tooling.**
 
 ### Tradeoffs (be honest about these)
 
@@ -883,7 +883,7 @@ rm -rf ~/.xli/                # personas, scratch projects, chat transcripts
 # Per-project state (run in each project dir)
 rm -rf .xli/
 
-# Server-side: revoke every key IXAAC created
+# Server-side: revoke every key iXaac created
 xli bootstrap --revoke --prefix worker --yes
 xli bootstrap --revoke --prefix primary --yes
 # (Delete xli-prefixed collections via the xAI dashboard, or with `xli gc`)
@@ -902,7 +902,7 @@ xli bootstrap --revoke --prefix primary --yes
 If you're a fresh agent session picking up this project:
 
 1. **Read `proposals/ref-system.md`** — it's the comprehensive design document for the knowledge layer. The four open questions at the bottom are still open; the architecture above them is settled.
-2. **Read the memory notes at `~/.claude/projects/-home-birdman-Projects-XLI/memory/`** if accessible — they contain the philosophical thesis, the IXAAC rebrand context, the XMPP design plan, and a survey of the user's prior project at `~/isaac2/Isaac` (a cautionary tale + design library).
+2. **Read the memory notes at `~/.claude/projects/-home-birdman-Projects-XLI/memory/`** if accessible — they contain the philosophical thesis, the iXaac rebrand context, the XMPP design plan, and a survey of the user's prior project at `~/isaac2/Isaac` (a cautionary tale + design library).
 3. **Don't propose features that violate the thesis.** Vendor-curated tool palettes, kitchen-sink subsystem sprawl, finished products instead of composable primitives — these are anti-patterns for this project.
 4. **Reasoning models are weaker at instruction-following.** When debugging "the doc/persona isn't sticking," check the model first.
 5. **Workers are read-only investigators.** Never propose giving them write access; that's a load-bearing safety property.
