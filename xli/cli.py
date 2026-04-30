@@ -191,19 +191,29 @@ def cmd_init(args: argparse.Namespace) -> int:
         name=name,
         existing_collection_id=args.collection_id,
         local_only=args.local,
-        snapshot=args.snapshot,
     )
 
     if args.local:
-        line = f"[green]✓[/green] initialized [bold]{project.name}[/bold] [dim](local mode — no Collection)[/dim]"
-        if args.snapshot:
-            idx = project.xli_dir / "index.txt"
-            n = sum(1 for _ in idx.open()) if idx.exists() else 0
-            line += f"\n  [dim]index: .xli/index.txt — {n} files cached[/dim]"
-        console.print(line)
+        console.print(
+            f"[green]✓[/green] initialized [bold]{project.name}[/bold] "
+            "[dim](local mode — no Collection)[/dim]"
+        )
     else:
         console.print(
-            f"[green]✓[/green] initialized [bold]{project.name}[/bold] → collection {project.collection_id}"
+            f"[green]✓[/green] initialized [bold]{project.name}[/bold] → "
+            f"collection {project.collection_id}"
+        )
+
+    if args.snapshot:
+        from xli.sync import write_file_index
+        with console.status("[cyan]indexing files… 0[/cyan]") as status:
+            def progress(n: int, last: str) -> None:
+                # Truncate last path so the status line doesn't wrap weirdly.
+                short = last if len(last) <= 60 else "…" + last[-59:]
+                status.update(f"[cyan]indexing files… {n}[/cyan]  [dim]{short}[/dim]")
+            count = write_file_index(project, cfg, on_progress=progress)
+        console.print(
+            f"  [dim]index: .xli/index.txt — {count} files cached[/dim]"
         )
 
     pool_size = len(cfg.key_pairs())

@@ -12,7 +12,7 @@ from loguru import logger
 
 from xli.client import Clients, iter_collection_documents
 from xli.config import GlobalConfig, ProjectConfig
-from xli.ignore import load_ignore_spec, walk_project
+from xli.ignore import load_ignore_spec, walk_paths_only, walk_project
 from xli.manifest import FileEntry, Manifest, hash_file
 
 # Per-op retry on rate limiting. Same policy as bootstrap.create_api_key —
@@ -328,23 +328,42 @@ def sync_project(
     return stats
 
 
-def write_file_index(project: ProjectConfig, cfg: GlobalConfig) -> int:
+def write_file_index(
+    project: ProjectConfig,
+    cfg: GlobalConfig,
+    *,
+    on_progress: Optional[Callable[[int, str], None]] = None,
+) -> int:
     """Walk the project tree (respecting ignores) and write
     `<root>/.xli/index.txt` containing every tracked relpath plus its byte size,
     one per line: `<size>\\t<relpath>`. Returns the count.
 
-    The agent can grep this file instead of walking the live filesystem — much
-    faster on big read-mostly trees (NAS, media collections, archives).
+    Uses `walk_paths_only` — NO content sniffing, NO size cap, NO binary skip.
+    A 150k-file NAS over the network can be indexed in ~30 seconds because we
+    only stat() each file (one network round-trip per file's metadata, vs the
+    8KB read per file that walk_project would do).
+
+    `on_progress(count, last_relpath)` fires every 1000 files so the caller
+    can show a live counter — without it, large trees look like the process
+    is hung.
     """
     spec = load_ignore_spec(project.project_root, project.extra_ignores)
     rows: list[str] = []
-    for path in walk_project(project.project_root, spec, max_bytes=cfg.max_file_bytes):
+    n = 0
+    last_rel = ""
+    for path in walk_paths_only(project.project_root, spec):
         rel = path.relative_to(project.project_root).as_posix()
         try:
             size = path.stat().st_size
         except OSError:
             size = 0
         rows.append(f"{size}\t{rel}")
+        n += 1
+        last_rel = rel
+        if on_progress is not None and n % 1000 == 0:
+            on_progress(n, rel)
+    if on_progress is not None and n % 1000 != 0:
+        on_progress(n, last_rel)
     project.xli_dir.mkdir(parents=True, exist_ok=True)
     (project.xli_dir / "index.txt").write_text("\n".join(rows) + "\n")
     return len(rows)
@@ -396,9 +415,10 @@ def init_project(
     )
     project.save()
 
-    if snapshot:
-        from xli.config import GlobalConfig as _GC
-        write_file_index(project, _GC.load())
+    # Note: snapshot index is written by the caller (cmd_init) so the walk
+    # can be wrapped in a live progress widget — on a 150k-file NAS the walk
+    # takes long enough that silent execution looks like a hang.
+    _ = snapshot  # kept in signature for backward compat; no-op here
 
     registry = Registry.load()
     registry.upsert(

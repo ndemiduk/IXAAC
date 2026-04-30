@@ -237,6 +237,20 @@ class TurnStats:
     server_tool_calls: int = 0  # web_search / x_search / code_execute sub-calls
     warnings: list[str] = field(default_factory=list)
 
+    @property
+    def model(self) -> str:
+        return self.orch.model
+
+    @property
+    def total_tokens(self) -> int:
+        return self.orch.total_tokens + self.workers.total_tokens
+
+    @property
+    def total_cost(self) -> Optional[float]:
+        if self.orch.cost_usd is None and self.workers.cost_usd is None:
+            return None
+        return (self.orch.cost_usd or 0.0) + (self.workers.cost_usd or 0.0)
+
 
 # Past-tense action verbs that imply work was completed. If the orchestrator
 # uses one of these but called zero tools, it's claiming work it did not do —
@@ -263,20 +277,6 @@ def _detect_unsupported_claim(text: str, stats: "TurnStats") -> Optional[str]:
         return None
     m = _CLAIM_PATTERN.search(text)
     return m.group(1).lower() if m else None
-
-    @property
-    def model(self) -> str:
-        return self.orch.model
-
-    @property
-    def total_tokens(self) -> int:
-        return self.orch.total_tokens + self.workers.total_tokens
-
-    @property
-    def total_cost(self) -> Optional[float]:
-        if self.orch.cost_usd is None and self.workers.cost_usd is None:
-            return None
-        return (self.orch.cost_usd or 0.0) + (self.workers.cost_usd or 0.0)
 
 
 def _cache_headers(conversation_id: Optional[str], suffix: str = "") -> Optional[dict]:

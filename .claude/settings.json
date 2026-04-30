@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/birdman/Projects/XLI/venv/bin/python -c ' *)"
+    ]
+  }
+}

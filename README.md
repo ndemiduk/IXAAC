@@ -103,7 +103,7 @@ xli status
 |---|---|---|
 | **Code agent** (project-scoped) | `xli code [TARGET]` | Working on a real project — files get uploaded, full RAG, mandatory verification. The "Claude Code"-style flow. |
 | **Chat / personas** | `xli chat [NAME]` | Conversation with persistent memory. Each persona is a Collection-backed long-running conversation. Different personalities, mid-session switching. |
-| **Local-only project** | `xli init --local [--snapshot]` | "Midnight Commander on steroids" — file management in a directory you don't want to upload. No Collection, no sync. `--snapshot` caches a path index for fast structural search. |
+| **Local-only project** | `xli init --local [--snapshot]` | File management in a directory whose contents you don't want uploaded — PDFs, audio, archives, scanned docs, photo libraries, anything that isn't really "text to upload." No Collection, no sync. `--snapshot` caches a path+size index (every file, content type irrelevant) so the agent can grep paths instead of walking the live tree. |
 | **Ephemeral scratch** | `xli scratch [NAME]` | One-off tasks in a fresh `~/.xli/scratch/<name>/` dir. Convenient for "rename these files", "find duplicates", quick experiments. |
 
 ---
@@ -259,7 +259,7 @@ xli scratch --no-chat       # just create the project, don't enter REPL
 xli scratch --yolo          # pass --yolo to the REPL
 ```
 
-For snapshotting an existing big directory (NAS, media collection), don't use scratch — instead run `xli init --local --snapshot` directly inside that directory.
+For snapshotting an existing big directory whose contents shouldn't be uploaded (audio, video, photo libraries, PDFs, exes, archives, scanned docs, anything binary or private), don't use scratch — instead run `xli init --local --snapshot` directly inside that directory.
 
 ---
 

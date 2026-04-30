@@ -97,3 +97,21 @@ def walk_project(
         if not is_probably_text(path):
             continue
         yield path
+
+
+def walk_paths_only(project_root: Path, spec: PathSpec) -> Iterator[Path]:
+    """Walk every file in the tree, respecting ignores — NO content sniffing,
+    NO size cap, NO binary skip.
+
+    For `--snapshot` mode where we just want paths and sizes for grep-based
+    structural search. Critical: walk_project's `is_probably_text` opens every
+    file to read 8KB, which is O(N) network round-trips on a NAS. This walker
+    only stat()s files, so it's roughly as fast as `find`.
+    """
+    for path in project_root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel_posix = path.relative_to(project_root).as_posix()
+        if spec.match_file(rel_posix) or spec.match_file(rel_posix + "/"):
+            continue
+        yield path
