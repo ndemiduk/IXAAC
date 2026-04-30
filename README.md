@@ -28,6 +28,8 @@ The thesis in one sentence:
 ## Headline capabilities
 
 - **Two complementary REPLs.** `xli code` for project work (read/write files, run tests, parallel workers, mandatory verification). `xli chat` for persona-based conversation with persistent memory.
+- **Multi-machine fabric (XMPP + OMEMO + Tailscale).** Your phone becomes a thin client to your home iXaac, not to OpenAI/Anthropic/xAI cloud chat apps. Send OMEMO-encrypted notifications outbound (`xmpp_send`); receive commands and run agent turns inbound (`xli daemon --xmpp`). Verb dispatch + agent fallback on a JID whitelist; full project context, your tools, your plugins. See [Multi-machine fabric](#multi-machine-fabric).
+- **Workspace registry.** Every directory `xli` runs in is auto-tracked in `~/.config/xli/workspaces.json` with a `kind` (`project` vs `snapshot`) and an optional alias. Used by the daemon to route phone messages to the right project, and by humans via `xli workspaces`.
 - **The knowledge layer — four slash commands working in concert:**
   - `/ref <persona>` — attach another persona's memory to the current session (cross-session recall)
   - `/doc <name>` — attach a reference doc into the system prompt (rules, conventions, specs)
@@ -401,6 +403,58 @@ When `plugin_search` finds no match, it returns a structured `NO_PLUGIN_MATCH` m
 
 ---
 
+## Multi-machine fabric
+
+The thesis: **your phone is a thin client to your local iXaac, not to a cloud chat app.** Conversations app on the phone sends OMEMO-encrypted XMPP messages over Tailscale to a Prosody server you run; iXaac on that machine handles them with your full project context, your plugins, your tools. Replies come back the same way. xAI tokens still get spent on the agent turn (you're paying anyway), but the substrate, logs, and orchestration are entirely yours.
+
+Two halves, intentionally split into separate XMPP identities:
+
+| Half | JID | Purpose | Risk |
+|---|---|---|---|
+| **Send** (Phase 1) | `sender@<your-tailnet>` | Outbound notifications. The agent calls this via the `xmpp_send` plugin. | low — send-only |
+| **Daemon** (Phase 2) | `daemon@<your-tailnet>` | Inbound listener. Decrypts messages from a JID whitelist; dispatches to verbs or to a one-shot agent run. | high — RCE-capable |
+
+Splitting the identities means a leaked sender password lets an attacker spoof notifications (annoying), but doesn't let them impersonate the daemon to your phone (RCE). Different OMEMO state files, different rotation schedules, different blast radius.
+
+### Phase 1 — `xmpp_send` (outbound)
+
+A markdown plugin at `~/.config/xli/plugins/xmpp_send.md` plus a sender script at `~/.config/xli/bin/xmpp_send.py` (running in its own dedicated venv to avoid polluting iXaac's). The agent finds the plugin via `plugin_search` on intents like *"send me a notification when this is done."* Reads the doc, composes the right `xmpp_send.py` invocation via bash. OMEMO end-to-end encrypted (Signal-style ratchet, BTBV trust). Setup walkthrough lives in `xmpp_send.md`.
+
+```bash
+~/.config/xli/bin/xmpp_send.py "$XMPP_DEFAULT_RECIPIENT" "tests passed"
+```
+
+### Phase 2 — `xli daemon --xmpp` (inbound)
+
+Long-running listener that decrypts incoming OMEMO messages from a JID whitelist and dispatches:
+
+1. **Built-in `kill`** — daemon shuts down cleanly.
+2. **Verb scripts** in `~/.config/xli/verbs/<name>.sh` — first word matches → run that script with the rest as args, reply with stdout. Base catalog: `disk`, `load`, `temp`, `branch`, `recent`, `wol`, `restart`. Drop new verbs in the directory; daemon picks them up at message time.
+3. **Workspace prefix** — `[alias] message...` overrides the agent fallback target so `[isaac2] grep me the auth module` runs the agent against that specific workspace.
+4. **Agent fallback** — anything that didn't match a verb spawns `xli ask` with the message as the prompt against the most-recently-active project workspace. Reply is the agent's output, OMEMO-encrypted back.
+
+```bash
+xli daemon --xmpp        # uses ~/.config/xli/daemon.toml; reads XMPP_DAEMON_PASSWORD from env
+```
+
+The daemon writes an append-only audit log at `~/.local/share/xli/daemon-audit.log` (JSONL: `{ts, from, body, status}`) — every received message, accepted or rejected.
+
+Substrate: **local Prosody bound to Tailscale only.** Don't try this on conversations.im or other public servers — anti-spam policies bounce messages between mutually-rostered paid accounts, and you can't fix it from outside. With Prosody on your tailnet, you control the policy.
+
+### Setup pointers
+
+Full reproducible setup (Tailscale install, Prosody config, cert provisioning, sender install, account registration, Conversations on the phone) lives in `~/.config/xli/plugins/xmpp_send.md`. The daemon-specific config lives in `~/.config/xli/daemon.toml.example` with annotated comments — copy to `daemon.toml` and edit.
+
+What's deferred from Solid v0:
+- Approval flow for high-impact verbs (second-factor JID confirmation)
+- systemd user-service unit (run as a service, restart on crash, auto-start at boot)
+- Per-JID privilege tiers (read-only vs full)
+- Job IDs for long-running verbs (currently sync; agent timeout 5 min)
+- File/blob transfer for photo intake (camera → desktop OCR pipeline)
+- Phase 3 agent-loop bot (research-level)
+
+---
+
 ## CLI subcommand reference
 
 ### Project lifecycle
@@ -414,7 +468,28 @@ When `plugin_search` finds no match, it returns a structured `NO_PLUGIN_MATCH` m
 | `xli code [TARGET] [--yolo]` | Project-scoped code REPL. `TARGET` can be a path or registered project name. |
 | `xli chat [NAME] [--new N \| --list \| --edit N \| --delete N] [--yolo] [--yes]` | Persona-based conversation REPL. |
 | `xli status [PATH]` | Show config, key pool, models, temperatures, project state, cost-tracking state. |
-| `xli projects [FILTER]` | List every registered project; filter by substring. |
+| `xli projects [FILTER]` | List every registered xli-initialized project (cloud-Collection-tracked); filter by substring. |
+| `xli ask --workspace W "PROMPT"` | One-shot agent run for non-interactive callers (used by the daemon for agent fallback). Prints reply to stdout. |
+
+### Workspaces
+
+Broader than `xli projects`: also includes directories you reference but don't `xli init` (e.g. archived snapshots). Auto-touched by every `xli` invocation (except stateless commands). Used by the XMPP daemon for agent-fallback dispatch routing.
+
+| Command | Effect |
+|---|---|
+| `xli workspaces list [--projects \| --snapshots]` | List workspaces, sorted by last-active. |
+| `xli workspaces add PATH [--snapshot] [--alias NAME] [--notes ...]` | Register a directory. Without `--snapshot` it's `kind=project`. |
+| `xli workspaces project KEY` / `xli workspaces snapshot KEY` | Flip a workspace's kind. KEY can be alias or path. |
+| `xli workspaces alias KEY [NEW_ALIAS]` | Set or clear an alias. Aliases are unique; setting a colliding alias clears the previous holder. |
+| `xli workspaces remove KEY` | Forget about a workspace. |
+
+### Multi-machine fabric
+
+| Command | Effect |
+|---|---|
+| `xli daemon --xmpp [--config PATH]` | Run the inbound XMPP command listener. Reads `~/.config/xli/daemon.toml` by default; password from `$XMPP_DAEMON_PASSWORD`. Re-execs through the OMEMO venv (`~/.config/xli/bin/venv/`) so slixmpp/slixmpp-omemo are available. |
+
+The outbound side (Phase 1) isn't a CLI subcommand — it's a plugin (`xmpp_send`) the agent calls when the user asks it to send a message. The `xmpp_send.py` script is at `~/.config/xli/bin/xmpp_send.py` if you want to invoke it manually.
 
 ### Knowledge management
 
@@ -712,13 +787,29 @@ xli code my-app
 # Agent uses httpx (not requests), creates a test, runs pytest before declaring done.
 ```
 
-### Multi-machine: send notifications (deferred — XMPP integration)
+### Multi-machine: phone-as-thin-client to home iXaac (shipped)
 
-Not yet shipped. Design preserved in `proposals/ref-system.md` and memory note. Phased roadmap: Phase 1 send-only `xmpp_send` plugin; Phase 2 command bot via Tailscale; Phase 3 agent-loop bot. See [Known limitations / future work](#known-limitations--future-work).
+Phase 1 (`xmpp_send` plugin) and Phase 2 (`xli daemon --xmpp` listener) both ship. Substrate: local Prosody on Tailscale + Conversations app on phone + OMEMO end-to-end encryption. Detailed walkthrough in [Multi-machine fabric](#multi-machine-fabric).
+
+```bash
+# Send a notification (Phase 1; agent does this via the xmpp_send plugin)
+~/.config/xli/bin/xmpp_send.py "$XMPP_DEFAULT_RECIPIENT" "long-running task done"
+
+# Run the inbound daemon (Phase 2)
+xli daemon --xmpp
+# Then from your phone (Conversations) to daemon@<your-tailnet>:
+#   "disk"                          → verb, replies with disk usage
+#   "[ixaac] what changed today?"   → agent run in the iXaac workspace
+#   "kill"                          → daemon shuts down cleanly
+```
+
+Phase 3 (agent-loop bot triggered by chat) is research-level and deferred.
 
 ---
 
 ## File layout
+
+### iXaac source
 
 ```
 xli/
@@ -736,13 +827,44 @@ xli/
   cost.py           Cost + token formatters (no fabricated rates)
   manifest.py       Per-file sha256 / mtime / file_id record
   ignore.py         .gitignore + .xliignore + binary-skip walker (walk_project) + paths-only walker (walk_paths_only)
-  registry.py       Global project registry
+  registry.py       Cloud-Collection-tracked xli-initialized projects (used by `xli gc` and `xli projects`)
+  workspaces.py     Broader workspace registry — every dir xli has run in + explicit references (used by daemon for routing)
   persona.py        Persona file management for `xli chat`
   transcript.py     Per-turn conversation persistence for personas
   doc.py            Reference doc management for `/doc`
   plugin.py         Plugin file management + subscription model + intent search for `/lib` + `/get`
+  daemon.py         XMPP inbound listener — Phase 2 of the multi-machine fabric (verb dispatch + agent fallback)
 proposals/
   ref-system.md     Detailed design proposal for the four-slash knowledge layer
+```
+
+### Per-user state under `~/.config/xli/`
+
+```
+config.json              Single global config (mode 0600). All credentials, models, pricing.
+projects.json            Registry of xli-initialized projects (collection_id, name, path).
+workspaces.json          Broader workspace registry (project + snapshot + last_active).
+plugins/                 Plugin catalog. One markdown file per plugin (id.md).
+docs/                    Reference docs attachable via /doc.
+personas/                Persona prompts + state for `xli chat`.
+verbs/                   Daemon verb catalog. One executable script per named verb.
+                         Base catalog: disk, load, temp, branch, recent, wol, restart.
+bin/                     Dedicated venv + helper scripts for the OMEMO sender.
+  xmpp_send.py             One-shot OMEMO-encrypted XMPP sender (Phase 1).
+  xmpp_check.py            Diagnostic for inspecting OMEMO PubSub state for any JID.
+  omemo-state.json         Sender's OMEMO identity + ratchet state (mode 0600).
+  venv/                    Python venv with slixmpp + slixmpp-omemo + crypto deps.
+daemon.toml              XMPP daemon config (JID, whitelist, rate limit, fallback settings).
+daemon.toml.example      Annotated template. Copy to daemon.toml and edit.
+daemon-omemo-state.json  Daemon's OMEMO identity + ratchet state (mode 0600). DIFFERENT from sender's.
+wol.txt                  Optional. Hostname → MAC whitelist for the `wol` verb.
+restart-allowed.txt      Optional. systemd unit names allowed for the `restart` verb.
+```
+
+### Append-only audit log
+
+```
+~/.local/share/xli/daemon-audit.log   JSONL — every inbound XMPP message, accepted or rejected.
 ```
 
 ---
@@ -822,9 +944,16 @@ L1 (read-and-bash) is shipped. L2 (templated curl in plugin's `## Usage`) and L3
 
 Currently `/ref bob` and `/doc react-rules` work session-only. Per-project persistent subscription files (`<project>/.xli/refs.txt`, `<project>/.xli/docs.txt`) so you don't have to re-attach every session — easy add when you find yourself doing it manually too often.
 
-### XMPP integration (multi-machine fabric)
+### XMPP fabric — what's still deferred
 
-Designed and scoped, not built. Phased: Phase 1 `xmpp_send` plugin (low risk, send-only notifications); Phase 2 `xli daemon --xmpp` command bot via Tailscale (medium-high risk — RCE-capable); Phase 3 agent-loop bot (research-level). The phone-at-work-talks-to-desktop-at-home use case is the headline pull. See memory note `xmpp_design.md` + proposal § "/get + /lib".
+Phases 1 and 2 ship (see [Multi-machine fabric](#multi-machine-fabric)). What's not yet built within Phase 2's scope:
+
+- **Approval flow for high-impact verbs.** A second-factor JID has to confirm within N seconds before the daemon executes destructive verbs (e.g. `restart prod`). Defer until you've used the daemon enough to know which verbs warrant the friction.
+- **systemd user-service unit.** Currently the daemon runs in a foreground terminal (or via `nohup ... &`). Wrapping it in a systemd user unit gives auto-start, restart-on-crash, structured journald logging.
+- **Per-JID privilege tiers.** Right now any whitelisted JID can run any verb. Tiered access (read-only vs full) is straightforward to add when more JIDs join the whitelist.
+- **Job IDs for long-running verbs.** Agent fallback can take 30s-5min. Currently the phone just waits; there's no `running... will reply when done` ack.
+- **File/blob transfer for photo intake.** XMPP supports inline file transfers (XEP-0066, HTTP upload). Phone takes a photo, daemon receives, OCRs, files. Same plumbing as the planned `/img` REPL command.
+- **Phase 3 agent-loop bot.** Bot fires off full multi-turn agent runs in response to messages, with chat-driven session state. Research-level; defer until Phase 2 has real-world use.
 
 ### Hierarchical .gitignore
 
@@ -856,7 +985,7 @@ This is the inverse of Claude Code / Codex / Cursor, which assume "vendor provid
 
 - **Plugins are markdown files the user writes** (or imports), not vendor-curated tools. Authoring friction matters more than feature breadth — the wizard (when shipped) is core, not a nice-to-have.
 - **Personas are user-defined personalities with their own indexed memory.** Each is a real Collection.
-- **Multi-machine is native.** Phone-at-work talks to desktop-at-home via XMPP daemon (when shipped). Not a hack.
+- **Multi-machine is native.** Phone-at-work talks to desktop-at-home via the XMPP daemon — shipped. Conversations app on the phone is the UI; OMEMO end-to-end encryption over Tailscale; verb dispatch + agent fallback into your local iXaac. Not a hack.
 - **Self-managing credentials.** Auto-provision, auto-expire, auto-rotate. User isn't asked to "bring an API key"; iXaac mints them.
 - **The agent fights its own model's hallucinations.** Yellow warning when claimed work doesn't match tool calls. Structurally suspicious.
 - **Reasoning models are tools for thinking, not following directions.** Document the trade-off; let users pick the right model for the job.
@@ -877,8 +1006,9 @@ This is the inverse of Claude Code / Codex / Cursor, which assume "vendor provid
 
 ```bash
 # Local state
-rm -rf ~/.config/xli/
-rm -rf ~/.xli/                # personas, scratch projects, chat transcripts
+rm -rf ~/.config/xli/             # config + plugins + docs + personas + verbs + bin/ + daemon state + workspaces
+rm -rf ~/.xli/                    # personas, scratch projects, chat transcripts
+rm -rf ~/.local/share/xli/        # XMPP daemon audit log
 
 # Per-project state (run in each project dir)
 rm -rf .xli/
@@ -887,6 +1017,10 @@ rm -rf .xli/
 xli bootstrap --revoke --prefix worker --yes
 xli bootstrap --revoke --prefix primary --yes
 # (Delete xli-prefixed collections via the xAI dashboard, or with `xli gc`)
+# Local Prosody users (if you set up the multi-machine fabric):
+#   sudo prosodyctl deluser sender@<your-tailnet>
+#   sudo prosodyctl deluser daemon@<your-tailnet>
+#   sudo prosodyctl deluser phone@<your-tailnet>
 ```
 
 ---
@@ -901,10 +1035,11 @@ xli bootstrap --revoke --prefix primary --yes
 
 If you're a fresh agent session picking up this project:
 
-1. **Read `proposals/ref-system.md`** — it's the comprehensive design document for the knowledge layer. The four open questions at the bottom are still open; the architecture above them is settled.
-2. **Read the memory notes at `~/.claude/projects/-home-birdman-Projects-XLI/memory/`** if accessible — they contain the philosophical thesis, the iXaac rebrand context, the XMPP design plan, and a survey of the user's prior project at `~/isaac2/Isaac` (a cautionary tale + design library).
-3. **Don't propose features that violate the thesis.** Vendor-curated tool palettes, kitchen-sink subsystem sprawl, finished products instead of composable primitives — these are anti-patterns for this project.
-4. **Reasoning models are weaker at instruction-following.** When debugging "the doc/persona isn't sticking," check the model first.
-5. **Workers are read-only investigators.** Never propose giving them write access; that's a load-bearing safety property.
-6. **The user works incrementally and trusts the substrate to compose.** Ship small slices that work end-to-end; defer L2/L3 elaborations until L1 friction is real.
+1. **Read `proposals/ref-system.md`** if it exists — it's the comprehensive design document for the knowledge layer. The four open questions at the bottom are still open; the architecture above them is settled. (`proposals/` is gitignored, so it may not be present in a fresh clone — see `~/Projects/XLI/proposals/` for the original copy.)
+2. **Read the memory notes** at `~/.claude/projects/-home-birdman-Projects-iXaac/memory/` (current project) and `~/.claude/projects/-home-birdman-Projects-XLI/memory/` (predecessor — same codebase, pre-rebrand). The current memory has Phase 1 + Phase 2 status; the predecessor has the philosophical thesis, the iXaac rebrand context, the original XMPP design plan, and a survey of `~/isaac2/Isaac` (a cautionary tale + design library).
+3. **The multi-machine fabric (Phases 1 + 2) ships.** Phase 1 = `xmpp_send` plugin (outbound notifications). Phase 2 = `xli daemon --xmpp` (inbound listener with verb dispatch + agent fallback). Substrate: local Prosody on Tailscale + Conversations on phone + OMEMO E2E. See `~/.config/xli/plugins/xmpp_send.md` for the reproducible setup.
+4. **Don't propose features that violate the thesis.** Vendor-curated tool palettes, kitchen-sink subsystem sprawl, finished products instead of composable primitives — these are anti-patterns for this project.
+5. **Reasoning models are weaker at instruction-following.** When debugging "the doc/persona isn't sticking," check the model first.
+6. **Workers are read-only investigators.** Never propose giving them write access; that's a load-bearing safety property.
+7. **The user works incrementally and trusts the substrate to compose.** Ship small slices that work end-to-end; defer L2/L3 elaborations until L1 friction is real.
 
