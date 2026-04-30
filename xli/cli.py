@@ -94,12 +94,38 @@ def _handle_ref_command(user_input: str, agent) -> bool:
 
         name = parts[1].strip()
         if not is_valid_name(name):
-            console.print(f"[red]invalid persona name: {name!r}[/red]")
+            existing = list_personas()
+            console.print(
+                f"[red]invalid persona name: {name!r}[/red]  "
+                "[dim](names are single tokens — letters, digits, _ . - only)[/dim]"
+            )
+            if existing:
+                console.print(
+                    "[dim]available personas: [/dim]"
+                    + ", ".join(f"[cyan]{p.name}[/cyan]" for p in existing)
+                )
             return True
         persona = Persona(name)
         if not persona.exists():
-            console.print(f"[red]no such persona: {name!r}[/red]  "
-                          f"[dim](create with [/dim][cyan]xli chat --new {name}[/cyan][dim])[/dim]")
+            from difflib import get_close_matches
+            existing = list_personas()
+            existing_names = [p.name for p in existing]
+            close = get_close_matches(name, existing_names, n=3, cutoff=0.4)
+            console.print(f"[red]no such persona: {name!r}[/red]")
+            if close:
+                console.print(
+                    "[dim]did you mean: [/dim]"
+                    + ", ".join(f"[cyan]{c}[/cyan]" for c in close) + "?"
+                )
+            elif existing_names:
+                console.print(
+                    "[dim]available personas: [/dim]"
+                    + ", ".join(f"[cyan]{n}[/cyan]" for n in existing_names)
+                )
+            else:
+                console.print(
+                    f"[dim](create one with [/dim][cyan]xli chat --new {name}[/cyan][dim])[/dim]"
+                )
             return True
         cid = persona.collection_id()
         if not cid:
@@ -132,6 +158,144 @@ def _handle_ref_command(user_input: str, agent) -> bool:
         return True
 
     return False
+
+
+def _handle_lib_command(user_input: str, project) -> bool:
+    """Handle `/lib` slash — manage plugin subscriptions for this project.
+
+    /lib                    list subscribed plugins for this project
+    /lib all                list every installed plugin (catalog)
+    /lib subscribe <id>     subscribe to a plugin
+    /lib unsubscribe <id>   unsubscribe
+    /lib remove <id>        delete a plugin entirely (catalog-wide)
+
+    Subscriptions persist at <project>/.xli/plugins.txt.
+    """
+    if not (user_input == "/lib" or user_input.startswith("/lib ")):
+        return False
+
+    from xli.plugin import (
+        Plugin, add_subscription, delete_plugin, is_valid_id,
+        list_plugins, load_subscriptions, remove_subscription,
+    )
+
+    parts = user_input.split(maxsplit=2)
+    sub = parts[1] if len(parts) >= 2 else None
+
+    if sub is None:
+        # /lib  → list subscribed
+        subs = load_subscriptions(project.xli_dir)
+        if not subs:
+            console.print(
+                "[dim](no plugins subscribed for this project)[/dim]\n"
+                "[dim]usage: [/dim][cyan]/lib all[/cyan][dim] to browse, "
+                "[/dim][cyan]/lib subscribe <id>[/cyan][dim] to add[/dim]"
+            )
+            return True
+        console.print(f"[bold]subscribed plugins ({len(subs)}):[/bold]")
+        for pid in subs:
+            p = Plugin(id=pid)
+            if p.exists():
+                console.print(f"  · [cyan]{pid}[/cyan]  [dim]{p.description() or '(no description)'}[/dim]")
+            else:
+                console.print(f"  · [yellow]{pid}[/yellow]  [red](orphan — file missing)[/red]")
+        return True
+
+    if sub == "all":
+        plugins = list_plugins()
+        subs = set(load_subscriptions(project.xli_dir))
+        if not plugins:
+            console.print("[dim](no plugins installed yet — [/dim]"
+                          "[cyan]xli plugin --new <id>[/cyan][dim])[/dim]")
+            return True
+        console.print(f"[bold]all installed plugins ({len(plugins)}):[/bold]  "
+                      "[dim]● = subscribed in this project[/dim]")
+        for p in plugins:
+            mark = "[bold green]●[/bold green]" if p.id in subs else " "
+            risk = p.risk()
+            risk_color = {"low": "green", "medium": "yellow", "high": "red"}.get(risk, "white")
+            console.print(
+                f"  {mark} [cyan]{p.id}[/cyan]  "
+                f"[{risk_color}]{risk}[/{risk_color}]  "
+                f"[dim]{p.description() or '(no description)'}[/dim]"
+            )
+        return True
+
+    if sub == "subscribe":
+        if len(parts) < 3:
+            console.print("[dim]usage: [/dim][cyan]/lib subscribe <id>[/cyan]")
+            return True
+        pid = parts[2].strip()
+        if not is_valid_id(pid):
+            console.print(f"[red]invalid plugin id: {pid!r}[/red]")
+            return True
+        p = Plugin(id=pid)
+        if not p.exists():
+            console.print(
+                f"[red]no such plugin: {pid!r}[/red]  "
+                f"[dim](create with [/dim][cyan]xli plugin --new {pid}[/cyan][dim])[/dim]"
+            )
+            return True
+        added = add_subscription(project.xli_dir, pid)
+        if added:
+            console.print(
+                f"[green]✓[/green] subscribed to [cyan]{pid}[/cyan] "
+                f"[dim](risk={p.risk()})[/dim]"
+            )
+        else:
+            console.print(f"[dim](already subscribed: {pid})[/dim]")
+        return True
+
+    if sub == "unsubscribe":
+        if len(parts) < 3:
+            console.print("[dim]usage: [/dim][cyan]/lib unsubscribe <id>[/cyan]")
+            return True
+        pid = parts[2].strip()
+        removed = remove_subscription(project.xli_dir, pid)
+        if removed:
+            console.print(f"[green]✓[/green] unsubscribed [cyan]{pid}[/cyan]")
+        else:
+            console.print(f"[dim]not subscribed: {pid!r}[/dim]")
+        return True
+
+    if sub == "remove":
+        if len(parts) < 3:
+            console.print("[dim]usage: [/dim][cyan]/lib remove <id>[/cyan]")
+            return True
+        pid = parts[2].strip()
+        p = Plugin(id=pid)
+        if not p.exists():
+            console.print(f"[red]no such plugin: {pid!r}[/red]")
+            return True
+        # Also unsubscribe from this project, since the file's about to vanish.
+        remove_subscription(project.xli_dir, pid)
+        delete_plugin(pid)
+        console.print(
+            f"[green]✓[/green] removed plugin [cyan]{pid}[/cyan] "
+            "[dim](other projects' subscriptions become orphan — cleaned on next /lib list)[/dim]"
+        )
+        return True
+
+    console.print(f"[red]unknown /lib subcommand: {sub!r}[/red]")
+    console.print("[dim]try: [/dim][cyan]/lib[/cyan][dim], [/dim][cyan]/lib all[/cyan][dim], "
+                  "[/dim][cyan]/lib subscribe <id>[/cyan][dim], [/dim]"
+                  "[cyan]/lib unsubscribe <id>[/cyan][dim], [/dim][cyan]/lib remove <id>[/cyan]")
+    return True
+
+
+def _attachment_tag(agent) -> str:
+    """Compact prompt-line indicator for /ref + /doc attachments.
+
+    Returns '+1r', '+2d', '+1r/2d', or '' (when nothing is attached). Inlined
+    into the prompt prefix in both REPLs so users always see at a glance
+    whether anything extra is in scope this session.
+    """
+    parts = []
+    if agent.attached_refs:
+        parts.append(f"{len(agent.attached_refs)}r")
+    if agent.attached_docs:
+        parts.append(f"{len(agent.attached_docs)}d")
+    return ("+" + "/".join(parts)) if parts else ""
 
 
 def _handle_doc_command(user_input: str, agent) -> bool:
@@ -169,14 +333,43 @@ def _handle_doc_command(user_input: str, agent) -> bool:
 
         name = parts[1].strip()
         if not _is_valid_doc_name(name):
-            console.print(f"[red]invalid doc name: {name!r}[/red]")
+            from xli.doc import list_docs as _list_docs
+            existing = _list_docs()
+            console.print(
+                f"[red]invalid doc name: {name!r}[/red]  "
+                "[dim](names are single tokens — letters, digits, _ . - only)[/dim]"
+            )
+            if existing:
+                console.print(
+                    "[dim]available docs: [/dim]"
+                    + ", ".join(f"[cyan]{d.name}[/cyan]" for d in existing)
+                )
             return True
         d = Doc(name)
         if not d.exists():
-            console.print(
-                f"[red]no such doc: {name!r}[/red]  "
-                f"[dim](create with [/dim][cyan]xli doc --new {name}[/cyan][dim])[/dim]"
-            )
+            from xli.doc import list_docs as _list_docs
+            from difflib import get_close_matches
+            existing = _list_docs()
+            existing_names = [doc.name for doc in existing]
+            close = get_close_matches(name, existing_names, n=3, cutoff=0.4)
+            msg_lines = [f"[red]no such doc: {name!r}[/red]"]
+            if close:
+                msg_lines.append(
+                    "[dim]did you mean: [/dim]"
+                    + ", ".join(f"[cyan]{c}[/cyan]" for c in close) + "?"
+                )
+            elif existing_names:
+                msg_lines.append(
+                    "[dim]available docs: [/dim]"
+                    + ", ".join(f"[cyan]{n}[/cyan]" for n in existing_names)
+                )
+            else:
+                msg_lines.append(
+                    "[dim](no docs exist yet — create with [/dim]"
+                    f"[cyan]xli doc --new {name}[/cyan][dim])[/dim]"
+                )
+            for line in msg_lines:
+                console.print(line)
             return True
         if any(n == name for n, _ in agent.attached_docs):
             console.print(f"[dim](already attached: {name})[/dim]")
@@ -263,6 +456,8 @@ SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /unref <persona>      Detach a previously-attached persona
   /doc [name]           Attach a reference doc into the system prompt (no arg = list)
   /undoc <name>         Detach a previously-attached doc
+  /lib [...]            Plugin library: list / all / subscribe / unsubscribe / remove
+  /get <intent>         Find + invoke a subscribed plugin matching the intent
   /status               Show project state (collection, pool, mode flags, refs, docs)
   /projects             List registered projects (current marked ●)
 
@@ -296,6 +491,13 @@ KNOWLEDGE (attached in any REPL via /doc <name>)
   doc --list               List all docs.
   doc --edit NAME          Edit a doc in $EDITOR.
   doc --delete NAME        Delete a doc.
+
+PLUGINS (subscribe in REPL via /lib subscribe; invoke via /get <intent>)
+  plugin --new ID          Create a new plugin from template; opens $EDITOR.
+  plugin --list            List all installed plugins.
+  plugin --show ID         Print a plugin's full markdown.
+  plugin --edit ID         Edit a plugin in $EDITOR.
+  plugin --delete ID       Delete a plugin.
 
 SETUP
   config                   Write a config template to ~/.config/xli/config.json.
@@ -1354,6 +1556,108 @@ def cmd_new(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_plugin(args: argparse.Namespace) -> int:
+    """Manage plugins at ~/.config/xli/plugins/<id>.md.
+
+    Plugins are markdown files describing external APIs. Subscribe a plugin
+    to a project with `/lib subscribe <id>` from inside the REPL — the agent
+    only sees subscribed plugins via plugin_search.
+    """
+    from xli.plugin import (
+        Plugin, PLUGINS_DIR, create_plugin, delete_plugin,
+        is_valid_id, list_plugins, open_in_editor as _open_in_editor,
+    )
+
+    if args.list:
+        plugins = list_plugins()
+        if not plugins:
+            console.print(
+                "[dim](no plugins yet — create one with [/dim]"
+                "[cyan]xli plugin --new <id>[/cyan][dim])[/dim]"
+            )
+            return 0
+        console.print("[dim]id (use this with /lib subscribe) · risk · categories · description[/dim]")
+        for p in plugins:
+            try:
+                meta = p.metadata()
+            except OSError:
+                meta = {}
+            cats = ", ".join(meta.get("categories") or []) or "—"
+            desc = meta.get("description") or "(no description)"
+            risk = meta.get("risk", "low")
+            risk_color = {"low": "green", "medium": "yellow", "high": "red"}.get(risk, "white")
+            console.print(
+                f"  [bold cyan]{p.id}[/bold cyan]  "
+                f"[{risk_color}]{risk}[/{risk_color}]  "
+                f"[dim]{cats}  ·  {desc}[/dim]"
+            )
+        return 0
+
+    if args.show:
+        p = Plugin(id=args.show)
+        if not p.exists():
+            console.print(f"[red]no such plugin: {args.show!r}[/red]")
+            return 1
+        console.print(p.read_raw())
+        return 0
+
+    if args.new:
+        if not is_valid_id(args.new):
+            console.print(f"[red]invalid plugin id: {args.new!r}[/red]")
+            return 1
+        p = Plugin(id=args.new)
+        if p.exists():
+            console.print(f"[yellow]plugin {args.new!r} already exists[/yellow] — use --edit instead")
+            return 1
+        create_plugin(args.new)
+        console.print(f"[green]✓[/green] created plugin [bold]{args.new}[/bold] at {p.path}")
+        console.print("[dim]opening $EDITOR — fill in the template, save, quit…[/dim]")
+        _open_in_editor(p.path)
+        console.print(
+            "[dim]ready. From any project REPL, [/dim]"
+            f"[cyan]/lib subscribe {args.new}[/cyan][dim] to make it available there.[/dim]"
+        )
+        return 0
+
+    if args.edit:
+        p = Plugin(id=args.edit)
+        if not p.exists():
+            console.print(f"[red]no such plugin: {args.edit!r}[/red]")
+            return 1
+        _open_in_editor(p.path)
+        console.print("[dim]ready. Already-subscribed projects will use the new content on next turn.[/dim]")
+        return 0
+
+    if args.delete:
+        p = Plugin(id=args.delete)
+        if not p.exists():
+            console.print(f"[red]no such plugin: {args.delete!r}[/red]")
+            return 1
+        if not args.yes:
+            console.print(
+                f"[yellow]about to delete plugin [bold]{args.delete}[/bold][/yellow]\n"
+                f"  path: {p.path}"
+            )
+            try:
+                ans = input("delete? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = ""
+            if ans != "y":
+                console.print("[dim]aborted[/dim]")
+                return 1
+        delete_plugin(args.delete)
+        console.print(
+            f"[green]✓[/green] deleted plugin {args.delete!r} "
+            "[dim](existing project subscriptions become orphan; cleanup on next sub list)[/dim]"
+        )
+        return 0
+
+    # No flag → list.
+    return cmd_plugin(argparse.Namespace(
+        list=True, new=None, edit=None, delete=None, show=None, yes=False,
+    ))
+
+
 def cmd_doc(args: argparse.Namespace) -> int:
     """Manage reference docs at ~/.config/xli/docs/<name>.md.
 
@@ -1372,9 +1676,11 @@ def cmd_doc(args: argparse.Namespace) -> int:
                 f"[dim](no docs yet — create one with [/dim][cyan]xli doc --new <name>[/cyan][dim])[/dim]"
             )
             return 0
+        console.print("[dim]name (use this with /doc) · size · first line[/dim]")
         for d in docs:
             console.print(
-                f"  [bold]{d.name}[/bold]  [dim]{d.size_bytes():,}b · {d.first_line()}[/dim]"
+                f"  [bold cyan]{d.name}[/bold cyan]"
+                f"  [dim]·  {d.size_bytes():,}b  ·  \"{d.first_line()}\"[/dim]"
             )
         return 0
 
@@ -1638,7 +1944,8 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
     persona.touch_used()
 
     while True:
-        prompt_prefix = f"[{persona.name}] › "
+        attach = _attachment_tag(agent)
+        prompt_prefix = f"[{persona.name}]{(' ' + attach) if attach else ''} › "
         try:
             user_input = session.prompt(f"\n{prompt_prefix}").strip()
         except (EOFError, KeyboardInterrupt):
@@ -1654,8 +1961,44 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             continue
         if _handle_doc_command(user_input, agent):
             continue
+        if _handle_lib_command(user_input, project):
+            continue
+        if user_input.startswith("/get "):
+            intent = user_input[len("/get "):].strip()
+            if intent:
+                user_input = (
+                    f"Use plugin_search to find a subscribed plugin matching this "
+                    f"intent, then plugin_get + bash to invoke it. If no plugin "
+                    f"matches (NO_PLUGIN_MATCH), tell me — do not fabricate output. "
+                    f"Intent: {intent}"
+                )
+            # Fall through — user_input is now the rephrased prompt, sent to model.
+        elif user_input == "/get":
+            console.print("[dim]usage: [/dim][cyan]/get <intent>[/cyan]"
+                          "[dim] — e.g. /get the weather in seattle[/dim]")
+            continue
         if user_input == "/help":
             console.print(CHAT_SLASH_HELP)
+            continue
+        if user_input == "/status":
+            from xli.transcript import count_turns as _count_turns
+            n_turns = _count_turns(persona.turns_dir)
+            console.print(f"persona: [bold magenta]{persona.name}[/bold magenta]")
+            console.print(f"  prompt:        {persona.prompt_path}")
+            console.print(f"  state dir:     {persona.project_root}")
+            console.print(f"  turns on disk: {n_turns}")
+            console.print(f"  yolo:          {'[red]ON[/red]' if agent.yolo else 'off'}")
+            if agent.attached_refs:
+                names = ", ".join(n for n, _ in agent.attached_refs)
+                console.print(f"  attached refs: [cyan]{names}[/cyan]")
+            else:
+                console.print(f"  attached refs: [dim](none)[/dim]")
+            if agent.attached_docs:
+                doc_names = ", ".join(n for n, _ in agent.attached_docs)
+                total = sum(len(c) for _, c in agent.attached_docs)
+                console.print(f"  attached docs: [cyan]{doc_names}[/cyan]  [dim]({total:,}b)[/dim]")
+            else:
+                console.print(f"  attached docs: [dim](none)[/dim]")
             continue
         if user_input == "/personas":
             _chat_list_personas()
@@ -1761,6 +2104,9 @@ CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
   /unref <persona>      Detach a previously-attached persona
   /doc [name]           Attach a reference doc into the system prompt (no arg = list)
   /undoc <name>         Detach a previously-attached doc
+  /lib [...]            Plugin library: list / all / subscribe / unsubscribe / remove
+  /get <intent>         Find + invoke a subscribed plugin matching the intent
+  /status               Show persona state (turns on disk, attached refs/docs)
   /sync                 Sync turn-files to the Collection now
   /yolo / /safe         Toggle bash confirmation gate
 
@@ -1822,7 +2168,9 @@ def cmd_code(args: argparse.Namespace) -> int:
 
     while True:
         prefix_tag = "[plan]" if agent.plan_mode else ("[yolo]" if agent.yolo else "")
-        prompt_prefix = f"{prefix_tag} › " if prefix_tag else "› "
+        attach = _attachment_tag(agent)
+        combined = " ".join(p for p in [prefix_tag, attach] if p)
+        prompt_prefix = f"{combined} › " if combined else "› "
         try:
             user_input = session.prompt(f"\n{prompt_prefix}").strip()
         except (EOFError, KeyboardInterrupt):
@@ -1837,6 +2185,22 @@ def cmd_code(args: argparse.Namespace) -> int:
         if _handle_ref_command(user_input, agent):
             continue
         if _handle_doc_command(user_input, agent):
+            continue
+        if _handle_lib_command(user_input, project):
+            continue
+        if user_input.startswith("/get "):
+            intent = user_input[len("/get "):].strip()
+            if intent:
+                user_input = (
+                    f"Use plugin_search to find a subscribed plugin matching this "
+                    f"intent, then plugin_get + bash to invoke it. If no plugin "
+                    f"matches (NO_PLUGIN_MATCH), tell me — do not fabricate output. "
+                    f"Intent: {intent}"
+                )
+            # Fall through — user_input is now the rephrased prompt, sent to model.
+        elif user_input == "/get":
+            console.print("[dim]usage: [/dim][cyan]/get <intent>[/cyan]"
+                          "[dim] — e.g. /get the weather in seattle[/dim]")
             continue
         if user_input == "/help":
             console.print(SLASH_HELP)
@@ -2107,6 +2471,18 @@ def main() -> int:
     p_gc.add_argument("--dry-run", action="store_true", help="Show what would be deleted, take no action")
     p_gc.add_argument("--yes", action="store_true", help="Delete all orphans without prompting")
     p_gc.set_defaults(func=cmd_gc)
+
+    p_plugin = sub.add_parser(
+        "plugin",
+        help="Manage plugins (markdown API descriptors used via /lib + /get).",
+    )
+    p_plugin.add_argument("--new", metavar="ID", help="Create a new plugin from template; opens $EDITOR")
+    p_plugin.add_argument("--list", action="store_true", help="List all installed plugins")
+    p_plugin.add_argument("--show", metavar="ID", help="Print a plugin's full markdown")
+    p_plugin.add_argument("--edit", metavar="ID", help="Edit a plugin in $EDITOR")
+    p_plugin.add_argument("--delete", metavar="ID", help="Delete a plugin")
+    p_plugin.add_argument("--yes", action="store_true", help="Skip confirmation for --delete")
+    p_plugin.set_defaults(func=cmd_plugin)
 
     p_doc = sub.add_parser(
         "doc",

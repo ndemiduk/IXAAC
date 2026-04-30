@@ -309,6 +309,8 @@ class WorkerAgent:
     # Inherits the parent agent's /ref attachments so workers dispatched for
     # cross-cutting investigations search the same collection set.
     extra_collection_ids: list[str] = field(default_factory=list)
+    # Inherits parent's plugin subscriptions so workers can plugin_search too.
+    subscribed_plugins: list[str] = field(default_factory=list)
 
     def run(self, task: str, context: Optional[str] = None) -> tuple[str, CallStats]:
         call = CallStats()
@@ -327,10 +329,16 @@ class WorkerAgent:
             pool=None,    # workers don't get a pool — no nested dispatch
             is_worker=True,
             extra_collection_ids=list(self.extra_collection_ids),
+            subscribed_plugins=list(self.subscribed_plugins),
         )
         schemas = worker_tool_schemas()
         if self.project.local_only:
             schemas = [s for s in schemas if s["function"]["name"] != "search_project"]
+        if not self.subscribed_plugins:
+            schemas = [
+                s for s in schemas
+                if s["function"]["name"] not in {"plugin_search", "plugin_get"}
+            ]
 
         model = self.cfg.get_model_for_role("worker")
         call.model = model
@@ -494,8 +502,18 @@ class Agent:
             schemas = tool_schemas() + [dispatch_subagent_schema()]
         if self.project.local_only:
             schemas = [s for s in schemas if s["function"]["name"] != "search_project"]
+        # Hide plugin_search / plugin_get when no plugins are subscribed —
+        # otherwise the agent has tools that always return NO_PLUGIN_MATCH.
+        from xli.plugin import load_subscriptions as _load_subs
+        if not _load_subs(self.project.xli_dir):
+            schemas = [
+                s for s in schemas
+                if s["function"]["name"] not in {"plugin_search", "plugin_get"}
+            ]
 
         self.history.append({"role": "user", "content": user_message})
+        from xli.plugin import load_subscriptions
+        subs = load_subscriptions(self.project.xli_dir)
         ctx = ToolContext(
             project=self.project,
             clients=self.clients,
@@ -504,6 +522,7 @@ class Agent:
             console=self.console,
             yolo=self.yolo,
             extra_collection_ids=[cid for _, cid in self.attached_refs],
+            subscribed_plugins=subs,
         )
         stats = TurnStats()
         stats.orch.model = self.cfg.get_model_for_role("orchestrator")
@@ -611,6 +630,11 @@ class Agent:
         stream = self.clients.chat.chat.completions.create(**kwargs)
 
         content_parts: list[str] = []
+        # Reasoning models (grok-4.20-reasoning, etc.) emit private "thinking"
+        # tokens in delta.reasoning_content separately from the user-facing
+        # answer in delta.content. Capture them so we can surface them when
+        # the model produces reasoning without a final content segment.
+        reasoning_parts: list[str] = []
         tool_buf: dict[int, dict[str, str]] = {}
         usage: Any = None
         live: Optional[Live] = None
@@ -624,6 +648,13 @@ class Agent:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
+
+                # Reasoning content from reasoning models. Don't render live —
+                # treat it as private thinking. Surface it after the stream
+                # ends *only if* no actual content arrived (diagnostic mode).
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
 
                 if getattr(delta, "content", None):
                     if live is None:
@@ -662,6 +693,29 @@ class Agent:
         finally:
             if live is not None:
                 live.stop()
+
+        # If a reasoning model produced thinking tokens but no actual content
+        # and no tool_calls, the user would see nothing — surface the
+        # reasoning so the failure mode is diagnostic rather than silent.
+        if reasoning_parts and not content_parts and not tool_buf:
+            from rich.markdown import Markdown as _Markdown
+            from rich.panel import Panel
+            reasoning_text = "".join(reasoning_parts).strip()
+            self.console.print()
+            self.console.print(
+                Panel(
+                    _Markdown(reasoning_text) if reasoning_text else "[dim](empty reasoning)[/dim]",
+                    title="[yellow]reasoning only — no final answer was produced[/yellow]",
+                    border_style="yellow",
+                    padding=(0, 1),
+                )
+            )
+            self.console.print(
+                "[dim]The reasoning model thought through the question but "
+                "didn't emit a final answer. Try rephrasing, or ask a "
+                "follow-up to push it past the reasoning phase.[/dim]"
+            )
+            streamed_any = True  # suppress empty-text re-print in REPL
 
         content = "".join(content_parts) or None
         tool_calls: Optional[list[Any]] = None
@@ -795,12 +849,14 @@ class Agent:
         if not task:
             return ("dispatch_subagent: 'task' is required", CallStats())
         context = args.get("context")
+        from xli.plugin import load_subscriptions
         worker_clients = self.pool.acquire()
         worker = WorkerAgent(
             clients=worker_clients,
             project=self.project,
             cfg=self.cfg,
             extra_collection_ids=[cid for _, cid in self.attached_refs],
+            subscribed_plugins=load_subscriptions(self.project.xli_dir),
         )
         text, wcall = worker.run(task, context=context)
         from xli.cost import format_cost, format_tokens

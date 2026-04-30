@@ -35,6 +35,10 @@ class ToolContext:
     # project's own collection. Populated from Agent.attached_refs — the
     # /ref slash command attaches persona memories for cross-session recall.
     extra_collection_ids: list[str] = field(default_factory=list)
+    # Subscribed plugin IDs for this session. plugin_search and plugin_get
+    # only see plugins in this list (mandatory subscription model — keeps
+    # the active set bounded as the catalog grows).
+    subscribed_plugins: list[str] = field(default_factory=list)
     # Server-tool sub-call usage (Responses API). Server tools fire one-shot
     # responses.create() calls outside the main chat loop; the agent drains
     # these accumulators after each tool batch into its CallStats.
@@ -333,6 +337,74 @@ def t_code_execute(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     return ToolResult(_truncate(text))
 
 
+def t_plugin_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    from xli.plugin import (
+        NO_PLUGIN_MATCH_MARKER,
+        Plugin,
+        search_plugins,
+    )
+    intent = (args.get("intent") or "").strip()
+    if not intent:
+        return ToolResult("plugin_search: 'intent' is required", is_error=True)
+    if not ctx.subscribed_plugins:
+        return ToolResult(
+            f"{NO_PLUGIN_MATCH_MARKER} for intent={intent!r}\n"
+            "No plugins are subscribed for this project. The user can install/subscribe "
+            "plugins with `xli plugin --new` and `/lib subscribe <id>`. "
+            "Tell the user no plugin is available — do NOT fabricate plugin output."
+        )
+    available = [Plugin(id=pid) for pid in ctx.subscribed_plugins]
+    available = [p for p in available if p.exists()]
+    matches = search_plugins(intent, available, limit=5)
+    if not matches:
+        cats = sorted({c for p in available for c in p.categories()})
+        cat_line = (
+            "Categories of subscribed plugins: " + ", ".join(cats)
+            if cats else
+            "No plugin categories declared on subscribed plugins."
+        )
+        return ToolResult(
+            f"{NO_PLUGIN_MATCH_MARKER} for intent={intent!r}\n"
+            f"{cat_line}\n"
+            "Suggest: install/subscribe a plugin that fits, or fall back to "
+            "web_search/bash. Do NOT fabricate plugin output."
+        )
+    out = ["Top matches (call plugin_get for full content of any candidate):"]
+    for p, score in matches:
+        cats = ", ".join(p.categories()) or "—"
+        out.append(
+            f"- [{p.id}] (score={score:.1f}, risk={p.risk()}, categories={cats})\n"
+            f"    {p.name()}: {p.description() or '(no description)'}"
+        )
+    return ToolResult("\n".join(out))
+
+
+def t_plugin_get(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    from xli.plugin import Plugin
+    name = (args.get("name") or "").strip()
+    if not name:
+        return ToolResult("plugin_get: 'name' is required", is_error=True)
+    if name not in ctx.subscribed_plugins:
+        return ToolResult(
+            f"plugin {name!r} is not subscribed for this project. "
+            f"Subscribed: {ctx.subscribed_plugins or '(none)'}. "
+            f"Use plugin_search first or ask the user to /lib subscribe {name}.",
+            is_error=True,
+        )
+    p = Plugin(id=name)
+    if not p.exists():
+        return ToolResult(
+            f"plugin {name!r} is subscribed but the file is missing on disk "
+            "(orphan subscription). Tell the user — do NOT fabricate.",
+            is_error=True,
+        )
+    try:
+        text = p.read_raw()
+    except OSError as e:
+        return ToolResult(f"read failed: {e}", is_error=True)
+    return ToolResult(_truncate(text))
+
+
 def t_search_project(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = args["query"]
     limit = int(args.get("limit", 10))
@@ -397,6 +469,8 @@ REGISTRY: dict[str, ToolFn] = {
     "web_search": t_web_search,
     "x_search": t_x_search,
     "code_execute": t_code_execute,
+    "plugin_search": t_plugin_search,
+    "plugin_get": t_plugin_get,
 }
 
 # Workers are read-only investigators: same toolset minus mutation + no swarm.
@@ -418,6 +492,8 @@ PARALLEL_SAFE: set[str] = {
     "web_search",
     "x_search",
     "code_execute",
+    "plugin_search",
+    "plugin_get",
     "dispatch_subagent",
 }
 
@@ -431,6 +507,8 @@ PLAN_MODE_TOOLS: set[str] = {
     "search_project",
     "web_search",
     "x_search",
+    "plugin_search",
+    "plugin_get",
 }
 
 
@@ -632,6 +710,50 @@ def tool_schemas() -> list[dict]:
                         "enable_video_understanding": {"type": "boolean"},
                     },
                     "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plugin_search",
+                "description": (
+                    "Search the project's subscribed plugins by intent. Returns top "
+                    "matches with id, score, risk, and one-line description. If no "
+                    "match, returns NO_PLUGIN_MATCH — when you see that, tell the user "
+                    "no plugin was found and DO NOT fabricate plugin output. Plugins "
+                    "are user-curated markdown files describing external APIs; once "
+                    "you find a candidate, call plugin_get to read its full doc, then "
+                    "compose a curl call via the bash tool to actually invoke the API."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "description": "Natural-language description of what data/action you need (e.g. 'current weather in seattle', 'recent SEC filings for tesla').",
+                        },
+                    },
+                    "required": ["intent"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plugin_get",
+                "description": (
+                    "Read the full markdown content of a subscribed plugin. Use after "
+                    "plugin_search identifies a candidate. The doc contains endpoints, "
+                    "auth requirements, curl examples, and gotchas — read it before "
+                    "composing the actual API call."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
+                    },
+                    "required": ["name"],
                 },
             },
         },
