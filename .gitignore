@@ -6,5 +6,5 @@ build/
 dist/
 proposals/  
 .xli/
-.env
+.claude/
 IXAAC.code-workspace

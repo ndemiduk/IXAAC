@@ -134,6 +134,89 @@ def _handle_ref_command(user_input: str, agent) -> bool:
     return False
 
 
+def _handle_doc_command(user_input: str, agent) -> bool:
+    """Handle `/doc` and `/undoc` slash commands.
+
+    `/doc`            — list currently-attached docs (in-session state)
+    `/doc <name>`     — attach <name>'s content to the system prompt
+    `/undoc <name>`   — detach
+
+    Mirrors `_handle_ref_command` shape but operates on agent.attached_docs
+    (which feeds the system prompt) instead of attached_refs (which feeds
+    search_project's collection list).
+    """
+    from xli.doc import Doc, INLINE_SOFT_CAP_BYTES, is_valid_name as _is_valid_doc_name
+
+    if not (user_input == "/doc" or user_input.startswith("/doc ") or
+            user_input == "/undoc" or user_input.startswith("/undoc ")):
+        return False
+
+    parts = user_input.split(maxsplit=1)
+    cmd = parts[0]
+
+    if cmd == "/doc":
+        if len(parts) == 1:
+            if not agent.attached_docs:
+                console.print("[dim](no docs attached this session)[/dim]")
+                console.print("[dim]usage: [/dim][cyan]/doc <name>[/cyan]"
+                              "[dim] to attach a reference doc[/dim]")
+            else:
+                console.print("[bold]attached docs:[/bold]")
+                for name, content in agent.attached_docs:
+                    size = len(content)
+                    console.print(f"  · [cyan]{name}[/cyan]  [dim]{size:,} bytes[/dim]")
+            return True
+
+        name = parts[1].strip()
+        if not _is_valid_doc_name(name):
+            console.print(f"[red]invalid doc name: {name!r}[/red]")
+            return True
+        d = Doc(name)
+        if not d.exists():
+            console.print(
+                f"[red]no such doc: {name!r}[/red]  "
+                f"[dim](create with [/dim][cyan]xli doc --new {name}[/cyan][dim])[/dim]"
+            )
+            return True
+        if any(n == name for n, _ in agent.attached_docs):
+            console.print(f"[dim](already attached: {name})[/dim]")
+            return True
+        try:
+            content = d.read()
+        except OSError as e:
+            console.print(f"[red]read failed: {e}[/red]")
+            return True
+        size = len(content)
+        agent.attached_docs.append((name, content))
+        warn = ""
+        if size > INLINE_SOFT_CAP_BYTES:
+            warn = (
+                f"  [yellow]⚠ {size:,} bytes is large for inline mode — "
+                "consider a persona + /ref for very long reference material[/yellow]"
+            )
+        console.print(
+            f"[green]✓[/green] attached doc [cyan]{name}[/cyan] "
+            f"[dim]({size:,} bytes inlined into system prompt)[/dim]"
+            + (f"\n{warn}" if warn else "")
+        )
+        return True
+
+    if cmd == "/undoc":
+        if len(parts) != 2:
+            console.print("[dim]usage: [/dim][cyan]/undoc <name>[/cyan]")
+            return True
+        name = parts[1].strip()
+        before = len(agent.attached_docs)
+        agent.attached_docs = [(n, c) for n, c in agent.attached_docs if n != name]
+        if len(agent.attached_docs) == before:
+            console.print(f"[dim]no doc attached named {name!r}[/dim]")
+        else:
+            console.print(f"[green]✓[/green] detached [cyan]{name}[/cyan]")
+        return True
+
+    return False
+
+
 def _run_shell_passthrough(user_input: str, cwd: Path) -> bool:
     """Handle `!<command>` shell passthrough at the REPL prompt.
 
@@ -178,7 +261,9 @@ SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /temp <0.0..2.0>      Override orchestrator temp for the next turn only
   /ref [persona]        Attach a persona's memory to search_project (no arg = list)
   /unref <persona>      Detach a previously-attached persona
-  /status               Show project state (collection, pool, mode flags, refs)
+  /doc [name]           Attach a reference doc into the system prompt (no arg = list)
+  /undoc <name>         Detach a previously-attached doc
+  /status               Show project state (collection, pool, mode flags, refs, docs)
   /projects             List registered projects (current marked ●)
 
 [dim]Admin commands (setup, keys, bootstrap, gc, models set) are CLI-only.[/dim]
@@ -205,6 +290,12 @@ CHAT (conversation with persistent memory)
   chat --list              List personas.
   chat --edit NAME         Edit a persona's prompt in $EDITOR.
   chat --delete NAME       Delete a persona (prompt + state dir).
+
+KNOWLEDGE (attached in any REPL via /doc <name>)
+  doc --new NAME           Create a new reference doc; opens $EDITOR.
+  doc --list               List all docs.
+  doc --edit NAME          Edit a doc in $EDITOR.
+  doc --delete NAME        Delete a doc.
 
 SETUP
   config                   Write a config template to ~/.config/xli/config.json.
@@ -1263,6 +1354,87 @@ def cmd_new(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_doc(args: argparse.Namespace) -> int:
+    """Manage reference docs at ~/.config/xli/docs/<name>.md.
+
+    Sub-routes off the action flags. Docs are markdown files inlined into
+    the agent's system prompt when attached via /doc <name> in either REPL.
+    """
+    from xli.doc import (
+        Doc, DOCS_DIR, create_doc, delete_doc, is_valid_name as _is_valid,
+        list_docs, open_in_editor as _open_in_editor,
+    )
+
+    if args.list:
+        docs = list_docs()
+        if not docs:
+            console.print(
+                f"[dim](no docs yet — create one with [/dim][cyan]xli doc --new <name>[/cyan][dim])[/dim]"
+            )
+            return 0
+        for d in docs:
+            console.print(
+                f"  [bold]{d.name}[/bold]  [dim]{d.size_bytes():,}b · {d.first_line()}[/dim]"
+            )
+        return 0
+
+    if args.new:
+        name = args.new
+        if not _is_valid(name):
+            console.print(f"[red]invalid doc name: {name!r}[/red]")
+            return 1
+        d = Doc(name)
+        if d.exists():
+            console.print(
+                f"[yellow]doc {name!r} already exists[/yellow] — use --edit instead"
+            )
+            return 1
+        create_doc(name)
+        console.print(f"[green]✓[/green] created doc [bold]{name}[/bold] at {d.path}")
+        console.print("[dim]opening $EDITOR — save and quit when done…[/dim]")
+        _open_in_editor(d.path)
+        console.print(
+            f"[dim]ready. In any REPL, run [/dim][cyan]/doc {name}[/cyan][dim] to attach it.[/dim]"
+        )
+        return 0
+
+    if args.edit:
+        d = Doc(args.edit)
+        if not d.exists():
+            console.print(f"[red]no such doc: {args.edit!r}[/red]")
+            return 1
+        _open_in_editor(d.path)
+        console.print(
+            f"[dim]ready. Re-attach with [/dim][cyan]/doc {args.edit}[/cyan][dim] "
+            "for the changes to take effect (already-running sessions hold the old text).[/dim]"
+        )
+        return 0
+
+    if args.delete:
+        d = Doc(args.delete)
+        if not d.exists():
+            console.print(f"[red]no such doc: {args.delete!r}[/red]")
+            return 1
+        if not args.yes:
+            console.print(
+                f"[yellow]about to delete doc [bold]{args.delete}[/bold][/yellow]\n"
+                f"  path: {d.path}"
+            )
+            try:
+                ans = input("delete? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = ""
+            if ans != "y":
+                console.print("[dim]aborted[/dim]")
+                return 1
+        delete_doc(args.delete)
+        console.print(f"[green]✓[/green] deleted doc {args.delete!r}")
+        return 0
+
+    # No flag → default to listing.
+    return cmd_doc(argparse.Namespace(list=True, new=None, edit=None, delete=None, yes=False))
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Persona-based conversational agent with persistent memory.
 
@@ -1480,6 +1652,8 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             continue
         if _handle_ref_command(user_input, agent):
             continue
+        if _handle_doc_command(user_input, agent):
+            continue
         if user_input == "/help":
             console.print(CHAT_SLASH_HELP)
             continue
@@ -1585,6 +1759,8 @@ CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
   /forget               Wipe current persona's transcript (with y/N confirm)
   /ref [persona]        Attach another persona's memory to this session (no arg = list)
   /unref <persona>      Detach a previously-attached persona
+  /doc [name]           Attach a reference doc into the system prompt (no arg = list)
+  /undoc <name>         Detach a previously-attached doc
   /sync                 Sync turn-files to the Collection now
   /yolo / /safe         Toggle bash confirmation gate
 
@@ -1660,6 +1836,8 @@ def cmd_code(args: argparse.Namespace) -> int:
             continue
         if _handle_ref_command(user_input, agent):
             continue
+        if _handle_doc_command(user_input, agent):
+            continue
         if user_input == "/help":
             console.print(SLASH_HELP)
             continue
@@ -1720,6 +1898,12 @@ def cmd_code(args: argparse.Namespace) -> int:
                 console.print(f"  attached refs: [cyan]{names}[/cyan]")
             else:
                 console.print(f"  attached refs: [dim](none)[/dim]")
+            if agent.attached_docs:
+                doc_names = ", ".join(n for n, _ in agent.attached_docs)
+                total = sum(len(c) for _, c in agent.attached_docs)
+                console.print(f"  attached docs: [cyan]{doc_names}[/cyan]  [dim]({total:,}b)[/dim]")
+            else:
+                console.print(f"  attached docs: [dim](none)[/dim]")
             continue
         if user_input == "/projects":
             reg = Registry.load()
@@ -1923,6 +2107,17 @@ def main() -> int:
     p_gc.add_argument("--dry-run", action="store_true", help="Show what would be deleted, take no action")
     p_gc.add_argument("--yes", action="store_true", help="Delete all orphans without prompting")
     p_gc.set_defaults(func=cmd_gc)
+
+    p_doc = sub.add_parser(
+        "doc",
+        help="Manage reference docs (markdown files attached via /doc in any REPL).",
+    )
+    p_doc.add_argument("--new", metavar="NAME", help="Create a new doc; opens $EDITOR")
+    p_doc.add_argument("--list", action="store_true", help="List all docs")
+    p_doc.add_argument("--edit", metavar="NAME", help="Open an existing doc in $EDITOR")
+    p_doc.add_argument("--delete", metavar="NAME", help="Delete a doc")
+    p_doc.add_argument("--yes", action="store_true", help="Skip confirmation prompt for --delete")
+    p_doc.set_defaults(func=cmd_doc)
 
     p_scratch = sub.add_parser(
         "scratch",

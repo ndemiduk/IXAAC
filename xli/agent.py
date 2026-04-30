@@ -418,6 +418,15 @@ class Agent:
     # (persona_name, collection_id). Populated by the /ref slash command;
     # session-level state, not persisted across REPL restarts.
     attached_refs: list[tuple[str, str]] = field(default_factory=list)
+    # Attached reference docs — markdown content inlined into the system
+    # prompt every turn. Each entry is (doc_name, content). Populated by
+    # /doc; session-level state. Captured separately from base_system_prompt
+    # so we can re-render the effective system prompt each turn as docs are
+    # attached/detached without touching the rest of history.
+    attached_docs: list[tuple[str, str]] = field(default_factory=list)
+    # Set in __post_init__ — the system prompt before any /doc attachments.
+    # Kept separate so _effective_system_prompt can rebuild fresh each turn.
+    base_system_prompt: str = ""
 
     def __post_init__(self) -> None:
         if not self.history:
@@ -438,13 +447,46 @@ class Agent:
                         "filesystem — this is the right tool when the tree is large."
                     )
                 sys_prompt = sys_prompt + "\n\n" + "\n".join(addendum)
-            self.history.append({"role": "system", "content": sys_prompt})
+            self.base_system_prompt = sys_prompt
+            self.history.append({"role": "system", "content": self._effective_system_prompt()})
+        else:
+            # History is pre-populated (e.g. persona chat with last-N turns
+            # already loaded). Capture history[0] as the base so /doc re-renders
+            # work cleanly.
+            if self.history and self.history[0].get("role") == "system":
+                self.base_system_prompt = self.history[0]["content"]
+
+    def _effective_system_prompt(self) -> str:
+        """Base system prompt + any attached /doc content. Rebuilt each turn
+        in run_turn() so /doc and /undoc take effect immediately without
+        replaying history."""
+        if not self.attached_docs:
+            return self.base_system_prompt
+        sections = [self.base_system_prompt.rstrip(), "", "---", "",
+                    "# Attached reference documents",
+                    "",
+                    "(These were attached by the user via `/doc <name>`. Treat "
+                    "them as authoritative project rules / framework conventions / "
+                    "specs the user wants you to follow.)",
+                    ""]
+        for name, content in self.attached_docs:
+            sections.append(f"## {name}")
+            sections.append("")
+            sections.append(content.rstrip())
+            sections.append("")
+        return "\n".join(sections)
 
     @property
     def clients(self) -> Clients:
         return self.pool.primary()
 
     def run_turn(self, user_message: str) -> tuple[str, set[str], TurnStats]:
+        # Refresh the system prompt so /doc and /undoc take effect immediately.
+        # Cheap when no docs are attached (string identity check); rebuilds
+        # only when the attached set changed.
+        if self.history and self.history[0].get("role") == "system":
+            self.history[0] = {"role": "system", "content": self._effective_system_prompt()}
+
         if self.plan_mode:
             user_message = PLAN_MODE_PREAMBLE + user_message
             schemas = plan_mode_schemas()
