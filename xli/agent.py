@@ -11,11 +11,15 @@ Two flavors:
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
 
 from xli.client import Clients
 from xli.config import GlobalConfig, ProjectConfig
@@ -60,6 +64,115 @@ WORKER_SYSTEM_PROMPT = """You are a worker agent dispatched by XLI to investigat
 You have read-only access to a project: search_project (hybrid RAG), read_file, list_dir, glob, grep, bash. You CANNOT modify files. You CANNOT dispatch further workers.
 
 Do the work, then return a tight summary of findings. Cite file paths and line numbers. Don't pad."""
+
+
+PREVIEW_LINE_LIMIT = 120  # max chars per preview line; tool output gets dimmed
+
+
+def _strip_line_number_prefix(line: str) -> str:
+    """t_read_file emits '     1\\tcontent'. Trim the prefix for previews."""
+    if "\t" in line:
+        head, _, rest = line.partition("\t")
+        if head.strip().isdigit():
+            return rest
+    return line
+
+
+def _trunc(s: str, n: int = PREVIEW_LINE_LIMIT) -> str:
+    s = s.rstrip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
+    """Return 1-3 short dimmed preview lines for a tool result.
+
+    Each tool's shape is tailored so the user sees the *gist* of the work
+    (head, tail, count, top hit) without the full output flooding the terminal.
+    The full content still goes to the model — this is purely visual feedback.
+    """
+    if is_error:
+        first = (content or "").split("\n", 1)[0]
+        return [f"  [red]⎿[/red] [red]{_trunc(first)}[/red]"] if first else []
+
+    text = (content or "").rstrip()
+    if not text:
+        return []
+    lines = text.splitlines()
+    if not lines:
+        return []
+
+    if name == "read_file":
+        n = len(lines)
+        first = _strip_line_number_prefix(lines[0])
+        return [f"  [dim]⎿ {n} line{'s' if n != 1 else ''} · {_trunc(first, 80)}[/dim]"]
+
+    if name == "list_dir":
+        if text == "(empty)":
+            return ["  [dim]⎿ (empty)[/dim]"]
+        sample = "  ".join(lines[:5])
+        return [f"  [dim]⎿ {len(lines)} entries · {_trunc(sample)}[/dim]"]
+
+    if name == "glob":
+        if text == "(no matches)":
+            return ["  [dim]⎿ no matches[/dim]"]
+        sample = ", ".join(lines[:3])
+        return [
+            f"  [dim]⎿ {len(lines)} match{'es' if len(lines) != 1 else ''} · {_trunc(sample)}[/dim]"
+        ]
+
+    if name == "grep":
+        if text == "(no matches)":
+            return ["  [dim]⎿ no matches[/dim]"]
+        out = [f"  [dim]⎿ {len(lines)} match{'es' if len(lines) != 1 else ''}[/dim]"]
+        for ln in lines[:2]:
+            out.append(f"  [dim]   {_trunc(ln)}[/dim]")
+        return out
+
+    if name == "bash":
+        # Drop the synthetic "--- exit N ---" trailer; show last 1-3 lines
+        # of real output. Tests / build commands put the verdict at the end.
+        meaningful = [ln for ln in lines if not ln.startswith("--- exit ")]
+        if not meaningful:
+            return [f"  [dim]⎿ {_trunc(lines[-1])}[/dim]"]
+        if len(meaningful) <= 3:
+            return [f"  [dim]⎿ {_trunc(ln)}[/dim]" for ln in meaningful]
+        return [f"  [dim]⎿ … {_trunc(meaningful[-3])}[/dim]"] + [
+            f"  [dim]   {_trunc(ln)}[/dim]" for ln in meaningful[-2:]
+        ]
+
+    if name == "search_project":
+        for ln in lines:
+            if ln.startswith("[1]"):
+                return [f"  [dim]⎿ {_trunc(ln)}[/dim]"]
+        return []
+
+    if name in ("web_search", "x_search"):
+        for ln in lines:
+            s = ln.strip()
+            if s and not s.startswith("---"):
+                return [f"  [dim]⎿ {_trunc(s)}[/dim]"]
+        return []
+
+    if name == "code_execute":
+        if len(lines) <= 2:
+            return [f"  [dim]⎿ {_trunc(ln)}[/dim]" for ln in lines if ln.strip()]
+        return [
+            f"  [dim]⎿ {_trunc(lines[0])}[/dim]",
+            f"  [dim]   … {_trunc(lines[-1])}[/dim]",
+        ]
+
+    if name == "dispatch_subagent":
+        for ln in lines:
+            if ln.startswith("---"):  # skip the worker[...] header
+                continue
+            s = ln.strip()
+            if s:
+                return [f"  [dim]⎿ {_trunc(s)}[/dim]"]
+        return []
+
+    # write_file, edit_file: tool result text already self-narrates
+    # ("wrote foo.py (123 bytes)" / "edited foo.py"), no preview needed.
+    return []
 
 
 PLAN_MODE_PREAMBLE = """[PLAN MODE ACTIVE]
@@ -122,6 +235,34 @@ class TurnStats:
     tool_calls: int = 0
     workers_dispatched: int = 0
     server_tool_calls: int = 0  # web_search / x_search / code_execute sub-calls
+    warnings: list[str] = field(default_factory=list)
+
+
+# Past-tense action verbs that imply work was completed. If the orchestrator
+# uses one of these but called zero tools, it's claiming work it did not do —
+# the system prompt forbids this but models violate it. We surface a yellow
+# warning under the turn line so the user knows to verify before trusting.
+_CLAIM_PATTERN = re.compile(
+    r"\b("
+    r"verified|created|wrote|added|installed|downloaded|uploaded|"
+    r"tested|ran|executed|launched|"
+    r"deleted|removed|"
+    r"fixed|patched|repaired|"
+    r"completed|implemented|built|generated|saved|persisted"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_unsupported_claim(text: str, stats: "TurnStats") -> Optional[str]:
+    """If the orchestrator claims an action but called 0 tools, return the
+    matched verb. False positives are tolerable — this is a nudge, not a wall."""
+    if stats.tool_calls > 0:
+        return None
+    if not text:
+        return None
+    m = _CLAIM_PATTERN.search(text)
+    return m.group(1).lower() if m else None
 
     @property
     def model(self) -> str:
@@ -184,6 +325,8 @@ class WorkerAgent:
             is_worker=True,
         )
         schemas = worker_tool_schemas()
+        if self.project.local_only:
+            schemas = [s for s in schemas if s["function"]["name"] != "search_project"]
 
         model = self.cfg.get_model_for_role("worker")
         call.model = model
@@ -270,7 +413,24 @@ class Agent:
 
     def __post_init__(self) -> None:
         if not self.history:
-            self.history.append({"role": "system", "content": MAIN_SYSTEM_PROMPT})
+            sys_prompt = MAIN_SYSTEM_PROMPT
+            if self.project.local_only:
+                addendum = [
+                    "",
+                    "[LOCAL MODE] This project has no remote Collection — there is "
+                    "no search_project tool available. For path-based search use "
+                    "glob/grep/list_dir; for content search use grep on the file directly.",
+                ]
+                index_path = self.project.xli_dir / "index.txt"
+                if index_path.exists():
+                    addendum.append(
+                        f"A pre-computed file index lives at `.xli/index.txt` "
+                        f"(format: `<size>\\t<relpath>` per line). Grep that file "
+                        "for fast structural search instead of walking the live "
+                        "filesystem — this is the right tool when the tree is large."
+                    )
+                sys_prompt = sys_prompt + "\n\n" + "\n".join(addendum)
+            self.history.append({"role": "system", "content": sys_prompt})
 
     @property
     def clients(self) -> Clients:
@@ -282,6 +442,8 @@ class Agent:
             schemas = plan_mode_schemas()
         else:
             schemas = tool_schemas() + [dispatch_subagent_schema()]
+        if self.project.local_only:
+            schemas = [s for s in schemas if s["function"]["name"] != "search_project"]
 
         self.history.append({"role": "user", "content": user_message})
         ctx = ToolContext(
@@ -308,19 +470,15 @@ class Agent:
 
         for _ in range(self.cfg.max_tool_iterations):
             stats.orch.iterations += 1
-            kwargs = dict(
+            msg, usage, streamed = self._stream_orchestrator_iteration(
                 model=model,
-                messages=self.history,
-                tools=schemas,
-                tool_choice="auto",
+                schemas=schemas,
                 temperature=temperature,
+                cache_hdrs=cache_hdrs,
             )
-            if cache_hdrs:
-                kwargs["extra_headers"] = cache_hdrs
-            resp = self.clients.chat.chat.completions.create(**kwargs)
-            stats.orch.absorb_usage(resp.usage, model, self.cfg.pricing)
+            if usage is not None:
+                stats.orch.absorb_usage(usage, model, self.cfg.pricing)
 
-            msg = resp.choices[0].message
             entry: dict[str, Any] = {"role": "assistant"}
             if msg.content:
                 entry["content"] = msg.content
@@ -339,7 +497,17 @@ class Agent:
             self.history.append(entry)
 
             if not msg.tool_calls:
-                return (msg.content or "", ctx.dirty_paths, stats)
+                # Inspect the actual content (not the empty string we'll return
+                # if streamed) so the claim detector still works post-stream.
+                claim = _detect_unsupported_claim(msg.content or "", stats)
+                if claim is not None:
+                    stats.warnings.append(
+                        f'model said "{claim}" but called 0 tools — verify before trusting'
+                    )
+                # Content was already streamed live; return empty text so the
+                # REPL doesn't print it again. The history still holds the real
+                # content for the next turn's context.
+                return ("" if streamed else (msg.content or ""), ctx.dirty_paths, stats)
 
             self._execute_tool_batch(msg.tool_calls, ctx, stats)
 
@@ -355,6 +523,113 @@ class Agent:
             ctx.dirty_paths,
             stats,
         )
+
+    # ------------------------------------------------------------------ #
+
+    def _stream_orchestrator_iteration(
+        self,
+        *,
+        model: str,
+        schemas: list,
+        temperature: float,
+        cache_hdrs: Optional[dict],
+    ) -> tuple[Any, Any, bool]:
+        """One orchestrator chat-completions call, streamed.
+
+        Streams content deltas live to the terminal. Tool-call deltas are
+        accumulated silently — the user sees discrete tool events (with
+        previews) in the next phase. Returns (msg, usage, streamed_text)
+        in the same shape the non-streaming code expects:
+        msg.content / msg.tool_calls[i].function.name / .arguments / .id
+
+        `streamed_text` is True iff any content was printed live; the caller
+        uses this to suppress double-printing in the REPL.
+        """
+        kwargs: dict[str, Any] = dict(
+            model=model,
+            messages=self.history,
+            tools=schemas,
+            tool_choice="auto",
+            temperature=temperature,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        if cache_hdrs:
+            kwargs["extra_headers"] = cache_hdrs
+
+        stream = self.clients.chat.chat.completions.create(**kwargs)
+
+        content_parts: list[str] = []
+        tool_buf: dict[int, dict[str, str]] = {}
+        usage: Any = None
+        live: Optional[Live] = None
+        streamed_any = False
+
+        try:
+            for chunk in stream:
+                # Final usage chunk arrives once stream_options.include_usage is set.
+                if getattr(chunk, "usage", None) is not None:
+                    usage = chunk.usage
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                if getattr(delta, "content", None):
+                    if live is None:
+                        # Blank line before the answer; open the Live widget
+                        # lazily so iterations with only tool_calls emit
+                        # nothing visible from this helper.
+                        self.console.print()
+                        live = Live(
+                            Markdown(""),
+                            console=self.console,
+                            refresh_per_second=10,
+                            vertical_overflow="visible",
+                        )
+                        live.start()
+                        streamed_any = True
+                    content_parts.append(delta.content)
+                    # Re-render the full buffer through Markdown so styling
+                    # converges as text accumulates. Cheap enough at 10 fps
+                    # for responses up to a few thousand tokens.
+                    live.update(Markdown("".join(content_parts)))
+
+                if getattr(delta, "tool_calls", None):
+                    for tcd in delta.tool_calls:
+                        idx = tcd.index
+                        buf = tool_buf.setdefault(
+                            idx, {"id": "", "name": "", "arguments": ""}
+                        )
+                        if getattr(tcd, "id", None):
+                            buf["id"] = tcd.id
+                        fn = getattr(tcd, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                buf["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                buf["arguments"] += fn.arguments
+        finally:
+            if live is not None:
+                live.stop()
+
+        content = "".join(content_parts) or None
+        tool_calls: Optional[list[Any]] = None
+        if tool_buf:
+            tool_calls = []
+            for idx in sorted(tool_buf.keys()):
+                buf = tool_buf[idx]
+                tool_calls.append(
+                    SimpleNamespace(
+                        id=buf["id"],
+                        type="function",
+                        function=SimpleNamespace(
+                            name=buf["name"],
+                            arguments=buf["arguments"],
+                        ),
+                    )
+                )
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return msg, usage, streamed_any
 
     # ------------------------------------------------------------------ #
 
@@ -423,9 +698,8 @@ class Agent:
             elif i in parallel_results:
                 result_text = parallel_results[i]
                 is_err = parallel_errors[i]
-                badge = "[red]✗[/red]" if is_err else "[green]✓[/green]"
                 suffix = " (worker)" if name == "dispatch_subagent" else " (parallel)"
-                self.console.print(f"  {badge} {name}{suffix}")
+                self._emit_tool_result(name, result_text, is_err, suffix=suffix)
             else:
                 fn = REGISTRY.get(name)
                 if fn is None:
@@ -436,8 +710,7 @@ class Agent:
                     try:
                         r = fn(ctx, args)
                         result_text, is_err = r.content, r.is_error
-                        badge = "[red]✗[/red]" if is_err else "[green]✓[/green]"
-                        self.console.print(f"  {badge} {name}")
+                        self._emit_tool_result(name, result_text, is_err)
                     except Exception as e:
                         result_text, is_err = f"tool raised: {type(e).__name__}: {e}", True
                         self.console.print(f"  [red]✗[/red] {name}: {e}")
@@ -485,6 +758,19 @@ class Agent:
             f"{wcall.iterations} iter · {format_tokens(wcall.total_tokens)}{cost_part} ---"
         )
         return (f"{header}\n{text}", wcall)
+
+    def _emit_tool_result(
+        self, name: str, content: str, is_error: bool, *, suffix: str = ""
+    ) -> None:
+        """Print the result badge plus a short preview of what came back.
+
+        The preview is purely cosmetic — the full content still flows to the
+        model. The shape per tool lives in _format_tool_preview.
+        """
+        badge = "[red]✗[/red]" if is_error else "[green]✓[/green]"
+        self.console.print(f"  {badge} {name}{suffix}")
+        for line in _format_tool_preview(name, content, is_error):
+            self.console.print(line)
 
     def _announce_tool(self, name: str, args: dict[str, Any]) -> None:
         if name in ("read_file", "write_file", "edit_file", "list_dir"):

@@ -199,6 +199,11 @@ class ProjectConfig:
     created_at: str
     extra_ignores: list[str] = field(default_factory=list)
     conversation_id: Optional[str] = None  # stable per-project UUID; used for xAI prompt-cache key
+    # Local-only mode: no remote Collection is provisioned and sync is a no-op.
+    # Tools available are everything except search_project (no RAG index to query).
+    # Use for ad-hoc / file-management workflows in directories you don't want to
+    # upload (private docs, mixed-content folders, ephemeral scratch).
+    local_only: bool = False
 
     @property
     def xli_dir(self) -> Path:
@@ -227,6 +232,7 @@ class ProjectConfig:
             created_at=data["created_at"],
             extra_ignores=data.get("extra_ignores", []),
             conversation_id=data.get("conversation_id"),
+            local_only=data.get("local_only", False),
         )
         # Backfill: legacy projects (created before this field existed) get a
         # stable UUID assigned + persisted on first load. From then on it stays.
@@ -245,6 +251,7 @@ class ProjectConfig:
                     "created_at": self.created_at,
                     "extra_ignores": self.extra_ignores,
                     "conversation_id": self.conversation_id,
+                    "local_only": self.local_only,
                 },
                 indent=2,
             )

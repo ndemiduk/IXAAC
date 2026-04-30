@@ -228,7 +228,14 @@ def sync_project(
     if it differs we update; if remote is missing we upload. Anything in the
     collection that has no local counterpart is removed. Mutating operations
     fan out across cfg.max_parallel_workers threads with 429 backoff per op.
+
+    Local-only projects skip the network entirely and rebuild the optional
+    file index in-place — the source of truth is always the local tree.
     """
+    if project.local_only:
+        if (project.xli_dir / "index.txt").exists() and not dry_run:
+            write_file_index(project, cfg)
+        return SyncStats()
     stats = SyncStats()
     manifest = Manifest.load(project.manifest_path)
     local = scan_local(project, cfg)
@@ -321,14 +328,44 @@ def sync_project(
     return stats
 
 
+def write_file_index(project: ProjectConfig, cfg: GlobalConfig) -> int:
+    """Walk the project tree (respecting ignores) and write
+    `<root>/.xli/index.txt` containing every tracked relpath plus its byte size,
+    one per line: `<size>\\t<relpath>`. Returns the count.
+
+    The agent can grep this file instead of walking the live filesystem — much
+    faster on big read-mostly trees (NAS, media collections, archives).
+    """
+    spec = load_ignore_spec(project.project_root, project.extra_ignores)
+    rows: list[str] = []
+    for path in walk_project(project.project_root, spec, max_bytes=cfg.max_file_bytes):
+        rel = path.relative_to(project.project_root).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        rows.append(f"{size}\t{rel}")
+    project.xli_dir.mkdir(parents=True, exist_ok=True)
+    (project.xli_dir / "index.txt").write_text("\n".join(rows) + "\n")
+    return len(rows)
+
+
 def init_project(
     clients: Clients,
     project_root: Path,
     *,
     name: Optional[str] = None,
     existing_collection_id: Optional[str] = None,
+    local_only: bool = False,
+    snapshot: bool = False,
 ) -> ProjectConfig:
-    """Create the .xli/ directory, create or reuse a collection, register it."""
+    """Create the .xli/ directory, create or reuse a collection, register it.
+
+    `local_only=True` skips Collection provisioning entirely — for ad-hoc /
+    file-management workflows where you don't want any content uploaded.
+    `snapshot=True` writes a paths+sizes index at .xli/index.txt for fast
+    grep-based structural search (most useful in local-only mode on big trees).
+    """
     import uuid
     from datetime import datetime, timezone
 
@@ -337,7 +374,9 @@ def init_project(
     project_root = project_root.resolve()
     name = name or project_root.name
 
-    if existing_collection_id:
+    if local_only:
+        coll_id = ""
+    elif existing_collection_id:
         coll_id = existing_collection_id
     else:
         meta = clients.xai.collections.create(
@@ -353,8 +392,13 @@ def init_project(
         collection_id=coll_id,
         created_at=created_at,
         conversation_id=uuid.uuid4().hex,  # stable per-project cache key
+        local_only=local_only,
     )
     project.save()
+
+    if snapshot:
+        from xli.config import GlobalConfig as _GC
+        write_file_index(project, _GC.load())
 
     registry = Registry.load()
     registry.upsert(

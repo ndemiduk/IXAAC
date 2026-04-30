@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -36,16 +37,62 @@ from xli.bootstrap import (
 from xli.client import Clients, MissingCredentials
 from xli.config import GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GlobalConfig, ProjectConfig
 from xli.cost import format_cost, format_tokens
+from xli.persona import (
+    DEFAULT_PROMPT,
+    Persona,
+    create_persona,
+    delete_persona,
+    is_valid_name,
+    last_used,
+    list_personas,
+    open_in_editor,
+)
 from xli.pool import ClientPool
 from xli.registry import REGISTRY_FILE, Registry
 from xli.sync import init_project, sync_project
+from xli.transcript import (
+    clear_turns,
+    count_turns,
+    load_recent_turns,
+    turns_to_history,
+    write_turn,
+)
+
+CHAT_RECENT_TURNS = 20  # how many past turns to inline as history at chat start
+
+
+def _run_shell_passthrough(user_input: str, cwd: Path) -> bool:
+    """Handle `!<command>` shell passthrough at the REPL prompt.
+
+    Runs the command locally in `cwd` with stdout/stderr inherited (so things
+    like `clear`, `ls --color`, and pagers work naturally). No chat turn, no
+    history change, no tokens. Returns True if the input was a `!` command and
+    was handled — caller should `continue` the REPL loop. Returns False
+    otherwise.
+    """
+    if not user_input.startswith("!"):
+        return False
+    cmd = user_input[1:].strip()
+    if not cmd:
+        console.print("[dim]usage: ![/dim][cyan]<shell command>[/cyan]   "
+                      "[dim](runs locally, no chat turn)[/dim]")
+        return True
+    try:
+        rc = subprocess.call(cmd, shell=True, cwd=str(cwd))
+    except (OSError, subprocess.SubprocessError) as e:
+        console.print(f"[red]shell error: {e}[/red]")
+        return True
+    if rc != 0:
+        console.print(f"[dim]exit {rc}[/dim]")
+    return True
 
 console = Console()
 
 
-SLASH_HELP = """[bold]Chat slash commands[/bold]
+SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /help                 Show this list
   /exit, /quit          Leave the REPL
+  !<shell command>      Run a shell command locally — no chat turn, no tokens
   /sync                 Sync local files to the collection now
   /reset                Clear conversation history (keep system prompt)
   /plan                 Enter plan mode (read-only investigation)
@@ -66,13 +113,23 @@ SLASH_HELP = """[bold]Chat slash commands[/bold]
 
 HELP_TEXT = """xli — Grok + xAI Collections coding agent.
 
-PROJECT
+PROJECT (code work — files, edits, builds)
   init [NAME]              Initialize an xli project in the current directory.
+                           --local: no Collection upload (Midnight Commander mode).
+                           --snapshot: cache .xli/index.txt for fast structural search.
   new NAME                 Create a new project directory and initialize it.
+  scratch [NAME]           Ephemeral local-only project under ~/.xli/scratch/, then chat.
   projects [FILTER]        List all registered xli projects.
   status [PATH]            Show config + project state.
   sync [PATH]              Push local changes to the project's collection.
-  chat [TARGET]            Start the REPL (default: cwd; --yolo skips bash gates).
+  code [TARGET]            Start the project-scoped code REPL (was `chat` pre-rename).
+
+CHAT (conversation with persistent memory)
+  chat [NAME]              Start a chat as persona NAME (default: most-recently-used).
+  chat --new NAME          Create a new persona; opens $EDITOR on its prompt.
+  chat --list              List personas.
+  chat --edit NAME         Edit a persona's prompt in $EDITOR.
+  chat --delete NAME       Delete a persona (prompt + state dir).
 
 SETUP
   config                   Write a config template to ~/.config/xli/config.json.
@@ -106,11 +163,6 @@ def cmd_help(args: argparse.Namespace) -> int:
 
 def cmd_init(args: argparse.Namespace) -> int:
     cfg = GlobalConfig.load()
-    try:
-        clients = Clients.from_config(cfg)
-    except MissingCredentials as e:
-        console.print(f"[red]{e}[/red]")
-        return 1
     project_root = Path(args.path or ".").resolve()
     if not project_root.is_dir():
         console.print(f"[red]not a directory: {project_root}[/red]")
@@ -120,28 +172,84 @@ def cmd_init(args: argparse.Namespace) -> int:
     if existing and not args.force:
         console.print(
             f"[yellow]project already initialized[/yellow] "
-            f"(name={existing.name}, collection={existing.collection_id})"
+            f"(name={existing.name}, collection={existing.collection_id or 'local-only'})"
         )
         return 0
+
+    # Local mode skips Collection provisioning, so no clients are needed for init.
+    clients = None
+    if not args.local:
+        try:
+            clients = Clients.from_config(cfg)
+        except MissingCredentials as e:
+            console.print(f"[red]{e}[/red]")
+            return 1
+
     project = init_project(
         clients,
         project_root,
         name=name,
         existing_collection_id=args.collection_id,
+        local_only=args.local,
+        snapshot=args.snapshot,
     )
-    console.print(
-        f"[green]✓[/green] initialized [bold]{project.name}[/bold] → collection {project.collection_id}"
-    )
+
+    if args.local:
+        line = f"[green]✓[/green] initialized [bold]{project.name}[/bold] [dim](local mode — no Collection)[/dim]"
+        if args.snapshot:
+            idx = project.xli_dir / "index.txt"
+            n = sum(1 for _ in idx.open()) if idx.exists() else 0
+            line += f"\n  [dim]index: .xli/index.txt — {n} files cached[/dim]"
+        console.print(line)
+    else:
+        console.print(
+            f"[green]✓[/green] initialized [bold]{project.name}[/bold] → collection {project.collection_id}"
+        )
+
     pool_size = len(cfg.key_pairs())
-    if pool_size <= 1 and cfg.management_api_key:
+    if not args.local and pool_size <= 1 and cfg.management_api_key:
         console.print(
             f"\n[yellow]tip:[/yellow] you have only {pool_size} chat key in the pool. "
             "Run [cyan]xli bootstrap[/cyan] to auto-provision worker keys for parallel "
             "swarm investigation."
         )
-    if args.sync:
+    if args.sync and not args.local:
         return cmd_sync(argparse.Namespace(path=str(project_root), dry_run=False))
     return 0
+
+
+def cmd_scratch(args: argparse.Namespace) -> int:
+    """Create an ephemeral local-only project under ~/.xli/scratch/<name>/ and drop into chat.
+
+    Use for: one-off file-management tasks ("rename these", "find duplicates"),
+    quick experiments, anything you don't want to upload as a project.
+    For snapshotting an existing big directory (NAS, media collection), run
+    `xli init --local --snapshot` *in that directory* instead — scratch creates
+    a fresh empty dir.
+    """
+    from datetime import datetime
+    name = args.name or datetime.now().strftime("%Y%m%d-%H%M%S")
+    scratch_root = (Path.home() / ".xli" / "scratch" / name).resolve()
+    scratch_root.mkdir(parents=True, exist_ok=True)
+
+    existing = ProjectConfig.load(scratch_root)
+    if existing and not args.force:
+        console.print(f"[yellow]scratch project already exists at[/yellow] {scratch_root}")
+    else:
+        project = init_project(
+            None,
+            scratch_root,
+            name=f"scratch/{name}",
+            local_only=True,
+            snapshot=False,  # empty dir; nothing to snapshot
+        )
+        console.print(
+            f"[green]✓[/green] scratch project [bold]{project.name}[/bold] at {scratch_root}"
+        )
+
+    if args.no_chat:
+        return 0
+    return cmd_code(argparse.Namespace(target=str(scratch_root), yolo=args.yolo))
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -1071,6 +1179,334 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    """Persona-based conversational agent with persistent memory.
+
+    Sub-routes for maintenance flags (--list / --new / --edit / --delete);
+    otherwise launches a chat REPL backed by the named persona.
+    """
+    if args.list:
+        return _chat_list_personas()
+    if args.new:
+        return _chat_new_persona(args.new)
+    if args.edit:
+        return _chat_edit_persona(args.edit)
+    if args.delete:
+        return _chat_delete_persona(args.delete, yes=args.yes)
+    return _chat_run_session(args.name, yolo=args.yolo)
+
+
+def _chat_list_personas() -> int:
+    personas = list_personas()
+    if not personas:
+        console.print(
+            "[dim](no personas yet — create one with [cyan]xli chat --new <name>[/cyan])[/dim]"
+        )
+        return 0
+    last = last_used()
+    last_name = last.name if last else None
+    for p in personas:
+        marker = "[bold green]●[/bold green]" if p.name == last_name else " "
+        try:
+            first = p.first_line()
+        except OSError:
+            first = "(unreadable)"
+        console.print(f"  {marker} [bold]{p.name}[/bold]  [dim]{first}[/dim]")
+    return 0
+
+
+def _chat_new_persona(name: str) -> int:
+    if not is_valid_name(name):
+        console.print(f"[red]invalid persona name: {name!r}[/red]")
+        return 1
+    p = Persona(name)
+    if p.exists():
+        console.print(f"[yellow]persona {name!r} already exists[/yellow] — use --edit instead")
+        return 1
+    create_persona(name)
+    console.print(f"[green]✓[/green] created persona [bold]{name}[/bold] at {p.prompt_path}")
+    console.print("[dim]opening $EDITOR — save and quit when done…[/dim]")
+    open_in_editor(p.prompt_path)
+    console.print(
+        f"[dim]ready. Run [cyan]xli chat {name}[/cyan] to start a session.[/dim]"
+    )
+    return 0
+
+
+def _chat_edit_persona(name: str) -> int:
+    p = Persona(name)
+    if not p.exists():
+        console.print(f"[red]no such persona: {name!r}[/red]")
+        return 1
+    open_in_editor(p.prompt_path)
+    console.print(f"[dim]ready. Run [cyan]xli chat {name}[/cyan] to start a session.[/dim]")
+    return 0
+
+
+def _chat_delete_persona(name: str, *, yes: bool) -> int:
+    p = Persona(name)
+    if not p.exists() and not p.project_root.exists():
+        console.print(f"[red]no such persona: {name!r}[/red]")
+        return 1
+    if not yes:
+        console.print(
+            f"[yellow]about to delete persona [bold]{name}[/bold][/yellow]\n"
+            f"  prompt:  {p.prompt_path}\n"
+            f"  state:   {p.project_root}\n"
+            f"  remote:  the persona's Collection will be left orphaned — "
+            f"use [cyan]xli gc[/cyan] to clean up afterwards"
+        )
+        try:
+            ans = input("delete? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans != "y":
+            console.print("[dim]aborted[/dim]")
+            return 1
+    prompt_removed, state_removed = delete_persona(name)
+    console.print(
+        f"[green]✓[/green] deleted persona {name!r} "
+        f"(prompt={'yes' if prompt_removed else 'no'}, state={'yes' if state_removed else 'no'})"
+    )
+    return 0
+
+
+def _resolve_persona_to_load(requested: Optional[str]) -> Optional[Persona]:
+    """Pick which persona to start a session with.
+
+    - explicit name → use it (auto-create with default prompt if it doesn't exist)
+    - no name + last-used exists → most-recently-used
+    - no name + no last-used + no personas → bootstrap a 'default' persona
+    - no name + multiple personas + no last-used → list and bail
+    """
+    if requested:
+        if not is_valid_name(requested):
+            console.print(f"[red]invalid persona name: {requested!r}[/red]")
+            return None
+        p = Persona(requested)
+        if not p.exists():
+            console.print(
+                f"[dim]persona {requested!r} doesn't exist — creating with default prompt[/dim]"
+            )
+            create_persona(requested)
+            console.print(
+                f"[dim](edit it later with [cyan]xli chat --edit {requested}[/cyan])[/dim]"
+            )
+        return p
+    last = last_used()
+    if last:
+        return last
+    personas = list_personas()
+    if not personas:
+        console.print("[dim]no personas yet — bootstrapping [bold]default[/bold]…[/dim]")
+        create_persona("default")
+        return Persona("default")
+    if len(personas) == 1:
+        return personas[0]
+    console.print(
+        "[yellow]multiple personas — pass one explicitly:[/yellow] "
+        + ", ".join(p.name for p in personas)
+    )
+    return None
+
+
+def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
+    persona = _resolve_persona_to_load(requested_name)
+    if persona is None:
+        return 1
+
+    cfg = GlobalConfig.load()
+    try:
+        pool = ClientPool.from_config(cfg)
+    except MissingCredentials as e:
+        console.print(f"[red]{e}[/red]")
+        return 1
+
+    # Each persona is a real XLI project (Collection-backed) — first run
+    # initializes it; subsequent runs just load it.
+    persona.project_root.mkdir(parents=True, exist_ok=True)
+    project = ProjectConfig.load(persona.project_root)
+    if project is None:
+        console.print(f"[dim]initializing persona project for [bold]{persona.name}[/bold]…[/dim]")
+        try:
+            project = init_project(
+                pool.primary(),
+                persona.project_root,
+                name=f"chat/{persona.name}",
+            )
+        except Exception as e:
+            console.print(f"[red]could not init persona project: {e}[/red]")
+            return 1
+
+    # Sync any prior turn-files (catches edits made between sessions).
+    if not project.local_only:
+        with console.status("[cyan]syncing memory before chat…[/cyan]"):
+            stats = sync_project(pool.primary(), project, cfg)
+        console.print(f"[dim]sync: {stats.summary()}[/dim]")
+
+    # Build the agent's initial history: persona's system prompt + last N turns.
+    recent = load_recent_turns(persona.turns_dir, CHAT_RECENT_TURNS)
+    history: list[dict] = [{"role": "system", "content": persona.system_prompt()}]
+    history.extend(turns_to_history(recent))
+    total_turns = count_turns(persona.turns_dir)
+
+    agent = Agent(
+        pool=pool,
+        project=project,
+        cfg=cfg,
+        history=history,
+        console=console,
+        yolo=yolo,
+    )
+
+    history_path = project.xli_dir / "repl_history"
+    session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
+
+    yolo_banner = "  ·  [red]YOLO[/red]" if agent.yolo else ""
+    memory_line = (
+        f"memory: {total_turns} turn(s) on disk · {len(recent)} loaded inline · "
+        f"older searchable via search_project"
+    )
+    console.print(
+        Panel.fit(
+            f"[bold cyan]XLI chat[/bold cyan] v{__version__}  ·  "
+            f"[magenta]{persona.name}[/magenta]{yolo_banner}\n"
+            f"orchestrator: {cfg.orchestrator()}  ·  worker: {cfg.worker()}\n"
+            f"{memory_line}\n"
+            "[dim]type [/dim][bold]/help[/bold][dim] for slash commands · "
+            "[/dim][bold]/persona[/bold][dim] to switch[/dim]",
+            border_style="magenta",
+        )
+    )
+
+    persona.touch_used()
+
+    while True:
+        prompt_prefix = f"[{persona.name}] › "
+        try:
+            user_input = session.prompt(f"\n{prompt_prefix}").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]bye[/dim]")
+            return 0
+        if not user_input:
+            continue
+        if user_input in ("/exit", "/quit"):
+            return 0
+        if _run_shell_passthrough(user_input, project.project_root):
+            continue
+        if user_input == "/help":
+            console.print(CHAT_SLASH_HELP)
+            continue
+        if user_input == "/personas":
+            _chat_list_personas()
+            continue
+        if user_input.startswith("/persona"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) != 2:
+                console.print(f"[dim]current persona: [bold]{persona.name}[/bold][/dim]")
+                console.print("[dim]usage: /persona <name>[/dim]")
+                continue
+            new_name = parts[1].strip()
+            if new_name == persona.name:
+                console.print(f"[dim]already chatting as {new_name!r}[/dim]")
+                continue
+            console.print(f"[dim]switching to [bold]{new_name}[/bold]…[/dim]")
+            return _chat_run_session(new_name, yolo=yolo)
+        if user_input == "/edit":
+            open_in_editor(persona.prompt_path)
+            console.print(
+                "[yellow]prompt edited[/yellow] — restart the session for the change "
+                "to take effect (the agent is using the prompt loaded at start)."
+            )
+            continue
+        if user_input == "/forget":
+            n = count_turns(persona.turns_dir)
+            if n == 0:
+                console.print("[dim]nothing to forget — no turns recorded yet[/dim]")
+                continue
+            try:
+                ans = input(f"  delete all {n} turns for {persona.name!r}? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = ""
+            if ans != "y":
+                console.print("[dim]aborted[/dim]")
+                continue
+            removed = clear_turns(persona.turns_dir)
+            agent.history = agent.history[:1]  # keep system prompt only
+            console.print(f"[green]✓[/green] removed {removed} turn(s); next sync propagates deletes")
+            continue
+        if user_input == "/sync":
+            if project.local_only:
+                console.print("[dim]/sync: local-only project — nothing to upload[/dim]")
+                continue
+            with console.status("[cyan]syncing…[/cyan]"):
+                stats = sync_project(pool.primary(), project, cfg)
+            console.print(f"[dim]sync: {stats.summary()}[/dim]")
+            continue
+        if user_input == "/yolo":
+            agent.yolo = True
+            console.print("[red]YOLO mode ON[/red] — bash gate disabled")
+            continue
+        if user_input == "/safe":
+            agent.yolo = False
+            console.print("[green]safe mode ON[/green] — bash gate enabled")
+            continue
+
+        # Real conversation turn.
+        try:
+            text, dirty, turn_stats = agent.run_turn(user_input)
+        except Exception as e:
+            console.print(f"[red]turn failed: {e}[/red]")
+            continue
+
+        # Pull the assistant's final reply out of history (works whether the
+        # text streamed live or was returned non-streaming).
+        final_reply = ""
+        for entry in reversed(agent.history):
+            if entry.get("role") == "assistant" and entry.get("content"):
+                final_reply = entry["content"]
+                break
+
+        if text:
+            console.print()
+            console.print(text)
+        console.print(_format_turn_line(turn_stats))
+        for warn in turn_stats.warnings:
+            console.print(f"  [yellow]⚠ {warn}[/yellow]")
+
+        # Persist the turn — only if the assistant actually replied.
+        if final_reply:
+            turn_path = write_turn(persona.turns_dir, user_input, final_reply)
+            try:
+                rel = turn_path.relative_to(project.project_root).as_posix()
+                dirty.add(rel)
+            except ValueError:
+                pass
+
+        if dirty and not project.local_only:
+            with console.status("[cyan]end-of-turn sync…[/cyan]"):
+                stats = sync_project(pool.primary(), project, cfg)
+            console.print(f"[dim]sync: {stats.summary()}[/dim]")
+
+
+CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
+  /help                 Show this list
+  /exit, /quit          Leave the REPL
+  !<shell command>      Run a shell command locally — no chat turn, no tokens
+  /persona <name>       Switch to another persona (loads its prompt + memory)
+  /personas             List personas
+  /edit                 Open current persona's prompt in $EDITOR
+  /forget               Wipe current persona's transcript (with y/N confirm)
+  /sync                 Sync turn-files to the Collection now
+  /yolo / /safe         Toggle bash confirmation gate
+
+[dim]Tip: ask the model to recall something specific — it will use search_project[/dim]
+[dim]over the synced turn-files for long-term memory beyond the inline window.[/dim]
+"""
+
+
+def cmd_code(args: argparse.Namespace) -> int:
+    """Project-scoped code agent (was `xli chat` before the rename to clarify
+    its purpose). Pass a project name or path; defaults to cwd."""
     cfg = GlobalConfig.load()
     try:
         pool = ClientPool.from_config(cfg)
@@ -1091,10 +1527,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Sync once on start so the agent has a current view.
-    with console.status("[cyan]syncing project before chat…[/cyan]"):
-        stats = sync_project(pool.primary(), project, cfg)
-    console.print(f"[dim]sync: {stats.summary()}[/dim]")
+    # Sync once on start so the agent has a current view (skipped in local mode).
+    if not project.local_only:
+        with console.status("[cyan]syncing project before chat…[/cyan]"):
+            stats = sync_project(pool.primary(), project, cfg)
+        console.print(f"[dim]sync: {stats.summary()}[/dim]")
 
     agent = Agent(pool=pool, project=project, cfg=cfg, console=console, yolo=args.yolo)
 
@@ -1102,11 +1539,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
     session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
 
     yolo_banner = "  ·  [red]YOLO[/red]" if agent.yolo else ""
+    local_banner = "  ·  [magenta]LOCAL[/magenta]" if project.local_only else ""
+    coll_line = (
+        f"collection: {project.collection_id}  ·  pool: {len(pool)} key(s)"
+        if not project.local_only
+        else f"local-only · pool: {len(pool)} key(s)"
+    )
     console.print(
         Panel.fit(
-            f"[bold cyan]XLI[/bold cyan] v{__version__}  ·  {project.name}{yolo_banner}\n"
+            f"[bold cyan]XLI[/bold cyan] v{__version__}  ·  {project.name}{yolo_banner}{local_banner}\n"
             f"orchestrator: {cfg.orchestrator()}  ·  worker: {cfg.worker()}\n"
-            f"collection: {project.collection_id}  ·  pool: {len(pool)} key(s)\n"
+            f"{coll_line}\n"
             "[dim]type [/dim][bold]/help[/bold][dim] for slash commands[/dim]",
             border_style="cyan",
         )
@@ -1124,6 +1567,8 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if user_input in ("/exit", "/quit"):
             return 0
+        if _run_shell_passthrough(user_input, project.project_root):
+            continue
         if user_input == "/help":
             console.print(SLASH_HELP)
             continue
@@ -1164,9 +1609,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
         if user_input == "/status":
             conv = (project.conversation_id or "")[:12]
+            mode = "[magenta]local-only[/magenta]" if project.local_only else "full (synced)"
             console.print(f"project: [bold]{project.name}[/bold]")
             console.print(f"  root:          {project.project_root}")
-            console.print(f"  collection_id: {project.collection_id}")
+            console.print(f"  mode:          {mode}")
+            if project.local_only:
+                idx = project.xli_dir / "index.txt"
+                if idx.exists():
+                    n = sum(1 for _ in idx.open())
+                    console.print(f"  index:         .xli/index.txt — {n} files cached")
+            else:
+                console.print(f"  collection_id: {project.collection_id}")
             console.print(f"  conv_id:       {conv}…")
             console.print(f"  pool:          {len(pool)} key(s)")
             console.print(f"  plan mode:     {'[yellow]ON[/yellow]' if agent.plan_mode else 'off'}")
@@ -1189,6 +1642,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
             console.print("[dim]history cleared[/dim]")
             continue
         if user_input == "/sync":
+            if project.local_only:
+                console.print("[dim]/sync: local-only project — nothing to upload[/dim]")
+                continue
             with console.status("[cyan]syncing…[/cyan]"):
                 stats = sync_project(pool.primary(), project, cfg)
             console.print(f"[dim]sync: {stats.summary()}[/dim]")
@@ -1241,8 +1697,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
             console.print()
             console.print(text)
         console.print(_format_turn_line(turn_stats))
+        for warn in turn_stats.warnings:
+            console.print(f"  [yellow]⚠ {warn}[/yellow]")
 
-        if dirty:
+        if dirty and not project.local_only:
             with console.status("[cyan]end-of-turn sync…[/cyan]"):
                 stats = sync_project(pool.primary(), project, cfg)
             console.print(f"[dim]sync: {stats.summary()}[/dim]")
@@ -1259,6 +1717,10 @@ def main() -> int:
     p_init.add_argument("--collection-id", help="Reuse an existing collection instead of creating one")
     p_init.add_argument("--no-sync", dest="sync", action="store_false", help="Skip the initial sync")
     p_init.add_argument("--force", action="store_true", help="Reinitialize even if project exists")
+    p_init.add_argument("--local", action="store_true",
+                        help="Local-only mode: no Collection, no upload, no sync. search_project disabled.")
+    p_init.add_argument("--snapshot", action="store_true",
+                        help="Cache a paths+sizes index at .xli/index.txt for fast structural search.")
     p_init.set_defaults(func=cmd_init, sync=True)
 
     p_new = sub.add_parser("new", help="Create a new project directory and initialize it.")
@@ -1279,10 +1741,26 @@ def main() -> int:
     p_status.add_argument("path", nargs="?", default=".")
     p_status.set_defaults(func=cmd_status)
 
-    p_chat = sub.add_parser("chat", help="Start the REPL. Pass a project NAME (registry lookup) or PATH; default cwd.")
-    p_chat.add_argument("target", nargs="?", help="Project name (from registry) or path")
-    p_chat.add_argument("--yolo", action="store_true",
+    p_code = sub.add_parser(
+        "code",
+        help="Project-scoped code agent REPL. Pass a project NAME (registry lookup) or PATH; default cwd.",
+    )
+    p_code.add_argument("target", nargs="?", help="Project name (from registry) or path")
+    p_code.add_argument("--yolo", action="store_true",
                         help="Auto-approve every bash command regardless of intent (no confirmation prompts)")
+    p_code.set_defaults(func=cmd_code)
+
+    p_chat = sub.add_parser(
+        "chat",
+        help="Persona-based conversational agent with persistent memory (each persona has its own Collection).",
+    )
+    p_chat.add_argument("name", nargs="?", help="Persona name (default: most-recently-used or 'default')")
+    p_chat.add_argument("--new", metavar="NAME", help="Create a new persona; opens $EDITOR on its prompt file")
+    p_chat.add_argument("--list", action="store_true", help="List all personas and exit")
+    p_chat.add_argument("--edit", metavar="NAME", help="Open an existing persona's prompt in $EDITOR")
+    p_chat.add_argument("--delete", metavar="NAME", help="Delete a persona (prompt + state dir)")
+    p_chat.add_argument("--yolo", action="store_true", help="Auto-approve bash commands")
+    p_chat.add_argument("--yes", action="store_true", help="Skip confirmation prompts (used with --delete)")
     p_chat.set_defaults(func=cmd_chat)
 
     p_config = sub.add_parser("config", help="Write a config template to ~/.config/xli/config.json if missing.")
@@ -1349,6 +1827,16 @@ def main() -> int:
     p_gc.add_argument("--dry-run", action="store_true", help="Show what would be deleted, take no action")
     p_gc.add_argument("--yes", action="store_true", help="Delete all orphans without prompting")
     p_gc.set_defaults(func=cmd_gc)
+
+    p_scratch = sub.add_parser(
+        "scratch",
+        help="Spin up an ephemeral local-only project under ~/.xli/scratch/<name>/ and drop into chat.",
+    )
+    p_scratch.add_argument("name", nargs="?", help="Scratch name (default: timestamp)")
+    p_scratch.add_argument("--no-chat", action="store_true", help="Just create the project, don't enter chat")
+    p_scratch.add_argument("--yolo", action="store_true", help="Pass --yolo to chat (auto-approve bash)")
+    p_scratch.add_argument("--force", action="store_true", help="Re-init even if scratch with this name exists")
+    p_scratch.set_defaults(func=cmd_scratch)
 
     p_help = sub.add_parser("help", help="Show grouped command listing.")
     p_help.set_defaults(func=cmd_help)

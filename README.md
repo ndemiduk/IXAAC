@@ -1,18 +1,30 @@
 # XLI
 
-A terminal coding agent powered by **Grok** with **xAI Collections** as the project context store. Your project's files are mirrored to a private collection per project, so the agent always has full scope (via hybrid RAG search) without uploading the whole tree on every turn.
+A terminal agent powered by **Grok**, with **xAI Collections** as the durable memory store. XLI ships with two complementary REPLs:
+
+- **`xli code`** — project-scoped coding agent (read/write files, run tests, dispatch parallel workers, mandatory verification before declaring success)
+- **`xli chat`** — persona-based conversational agent with persistent memory (each persona has its own Collection; old turns are searchable forever via RAG)
+
+Plus a quick-launch ephemeral mode (`xli scratch`) and a local-only mode (`xli init --local`) for "Midnight Commander on steroids" file-management workflows in directories you don't want to upload.
 
 It's a Claude-Code-shaped CLI built on the cheaper xAI stack, with:
 
-- **Multi-key swarm** — main orchestrator agent dispatches read-only worker agents in parallel, each on its own API key
+- **Multi-key swarm** — orchestrator dispatches read-only worker agents in parallel, each on its own API key
 - **Orchestrator/worker model split** — strong reasoning model for the main loop, fast/cheap model for workers
+- **Configurable temperatures** — warmer for the orchestrator (creative planning), colder for workers (precise execution)
+- **Streaming output with live Markdown rendering** — answers stream as they arrive; bold/code/headers render as the text accumulates
+- **Tool result previews** — short dimmed receipts under each tool call (file head, match counts, last lines of output) so you see work happening
 - **Plan mode** — investigate read-only, produce a numbered plan, approve to execute
-- **Auto-syncing** — files on disk are the source of truth; changed files are pushed to the collection at end of every turn
-- **Cost tracking** — per-turn token + USD totals, broken out orchestrator vs workers
+- **Auto-syncing** — files on disk are the source of truth; changed files push to the collection at end of every turn
+- **Cost tracking** — per-turn token + USD totals, broken out orchestrator vs workers; server-tool sub-calls absorbed
+- **Hallucination guard** — flags responses that claim work was done with 0 tool calls, so you know to verify
+- **xAI server-side tools** — `web_search`, `x_search`, `code_execute` (Python sandbox) callable as ordinary tools
 - **Self-provisioning keys** — single management key in env, all chat keys auto-created and revocable
 - **Auto-expiring keys** — chat keys default to 180-day expiry, rotatable in place
 
-> **Status: alpha.** It works end-to-end against a real xAI account. You should expect rough edges. File issues against this repo for any breakage.
+> **Status: alpha.** Works end-to-end against a real xAI account. Expect rough edges. File issues against this repo for any breakage.
+
+> **Note on the rename:** the command formerly called `xli chat` is now `xli code` (it's a code agent, not a chat agent). `xli chat` is now the persona-based conversational REPL.
 
 ---
 
@@ -23,8 +35,9 @@ It's a Claude-Code-shaped CLI built on the cheaper xAI stack, with:
   - A **management API key** (created in the xAI console under Team Settings)
   - At least one team you have admin access to (auto-discovered)
 - **Linux / macOS** (Windows untested)
+- `openai>=1.50` is recommended (server-tool calls use the Responses API).
 
-You do not need to manually create chat API keys — XLI will provision them for you.
+You do not need to manually create chat API keys — XLI will provision them.
 
 ---
 
@@ -37,7 +50,7 @@ python3 -m venv venv
 ./venv/bin/pip install -e .
 ```
 
-The `xli` command is now available at `./venv/bin/xli`. Symlink it onto your `PATH` if you want it global:
+Symlink onto your `PATH`:
 
 ```bash
 sudo ln -s "$(pwd)/venv/bin/xli" /usr/local/bin/xli
@@ -45,22 +58,15 @@ sudo ln -s "$(pwd)/venv/bin/xli" /usr/local/bin/xli
 
 ---
 
-## First-time setup (do this once)
+## First-time setup
 
 ### 1. Export your management key
-
-The management key is the **only** privileged credential — it can create, rotate, and revoke other API keys, and it manages your collections. It is **never** stored on disk by XLI. Add this to your shell rc (`~/.bashrc`, `~/.zshrc`):
 
 ```bash
 export XAI_MANAGEMENT_API_KEY=xai-...your-management-key...
 ```
 
-Re-source your shell, then verify:
-
-```bash
-xli status
-# should show "mgmt key: ✓ from env XAI_MANAGEMENT_API_KEY"
-```
+(Add to your shell rc.) The management key is the only privileged credential; never stored on disk by XLI.
 
 ### 2. Run `xli setup`
 
@@ -68,96 +74,72 @@ xli status
 xli setup
 ```
 
-This single command:
+Writes config, discovers your team_id, provisions 1 primary + 8 worker keys, sets 180-day expiration, auto-detects best models. See `xli setup --help` for tuning.
 
-- Writes a config template at `~/.config/xli/config.json` (chmod 600) if missing
-- Auto-discovers your `team_id` and caches it
-- Creates **1 primary chat key + 8 worker chat keys** via the xAI Management API (default; tune with `--workers N`)
-- Sets a **180-day expiration** on each (tune with `--expire-days N`)
-- Saves all chat keys to your config (revocable / rotatable later)
-- Attempts to auto-detect the best orchestrator and worker models
+### 3. (Optional) Configure pricing
 
-Output:
-
-```
-✓ wrote config template at /home/you/.config/xli/config.json
-· XAI_MANAGEMENT_API_KEY found in environment
-✓ team_id discovered + cached: c13e6a5c-...
-creating primary key (expires in 180d)…
-  ✓ primary-1  →  xAI: xli-primary-1  (expires in 180d)
-discovering available models on this team…
-✓ auto-detected from N model(s):
-    orchestrator: grok-4
-    worker:       grok-4-1-fast-non-reasoning
-creating 8 worker key(s) (expires in 180d)…
-  ✓ worker-1  →  xAI: xli-worker-1  (expires in 180d)
-  ...
-setup complete — pool size: 9 key(s)
-next: xli init in your project dir, or xli new <name> to start fresh
-```
-
-### 3. (If model auto-detection failed) Set models manually
-
-Some xAI accounts don't expose `/v1/models`. If `xli setup` reports it couldn't auto-detect, set them yourself:
-
-```bash
-xli models set --orchestrator grok-4 --worker grok-4-1-fast-non-reasoning
-```
-
-You can pick any models your account has access to — see your xAI dashboard.
-
-### 4. (Optional) Configure pricing for cost tracking
-
-Edit `~/.config/xli/config.json` and add a `pricing` map with USD-per-million-tokens rates from your xAI dashboard:
+Edit `~/.config/xli/config.json` and add `pricing` with USD-per-million-token rates from your xAI dashboard:
 
 ```json
 "pricing": {
-  "grok-4":                       {"input_per_million": 5.00, "output_per_million": 15.00},
+  "grok-4.20-reasoning":          {"input_per_million": 5.00, "output_per_million": 15.00},
   "grok-4-1-fast-non-reasoning":  {"input_per_million": 0.10, "output_per_million": 0.40}
 }
 ```
 
 Without `pricing`, token counts still display; cost numbers are simply omitted (XLI never fabricates a price).
 
+### 4. Verify
+
+```bash
+xli status
+```
+
 ---
 
-## Per-project workflow
+## The four modes
+
+| Mode | Command | Use case |
+|---|---|---|
+| **Code agent** (project-scoped) | `xli code [TARGET]` | Working on a real project — files get uploaded, full RAG, mandatory verification. The "Claude Code"-style flow. |
+| **Chat / personas** | `xli chat [NAME]` | Conversation with persistent memory. Each persona is a Collection-backed long-running conversation. Different personalities, mid-session switching. |
+| **Local-only project** | `xli init --local [--snapshot]` | "Midnight Commander on steroids" — file management in a directory you don't want to upload. No Collection, no sync. `--snapshot` caches a path index for fast structural search. |
+| **Ephemeral scratch** | `xli scratch [NAME]` | One-off tasks in a fresh `~/.xli/scratch/<name>/` dir. Convenient for "rename these files", "find duplicates", quick experiments. |
+
+---
+
+## Code REPL — `xli code`
 
 ### Initialize a project
-
-`cd` into any directory you want the agent to work on, then:
 
 ```bash
 xli init                    # name = current dir basename
 xli init my-app             # explicit name (becomes the collection label on xAI)
 xli init my-app --path /some/other/dir
+xli init --local            # no Collection, no upload, no sync (search_project disabled)
+xli init --local --snapshot # local + cache path/size index at .xli/index.txt for fast grep
+xli new my-app              # create the dir AND init it
 ```
 
-Or create a brand-new project from anywhere:
-
-```bash
-xli new my-app              # creates ./my-app, inits with name=my-app
-xli new my-app --path ~/Projects
-```
-
-This creates `.xli/` in the project root containing `project.json` (collection ID + name) and `manifest.json` (per-file sha256 + xAI file ID), then uploads every text file in the tree to a fresh xAI Collection. `.gitignore` is honored; you can add an `.xliignore` for extra patterns.
+`xli init` creates `.xli/` in the project root (containing `project.json` + `manifest.json`) and uploads every text file to a fresh xAI Collection. `.gitignore` is honored; you can add an `.xliignore` for extra patterns. Defaults skip `node_modules/`, `.next/`, `venv/`, `__pycache__/`, build outputs, and many more.
 
 ### Open the REPL
 
 ```bash
-xli chat                    # uses cwd
-xli chat my-app             # by registered project name (works from anywhere)
-xli chat /some/path         # by path
+xli code                    # uses cwd
+xli code my-app             # by registered project name (works from anywhere)
+xli code /some/path         # by path
+xli code --yolo             # auto-approve every bash command (use sparingly)
 ```
 
-The REPL syncs the project on entry (uploads anything that changed since last run), then drops you into an interactive prompt:
+The REPL syncs on entry, then drops you in:
 
 ```
 ╭──────────────────────────────────────────────────────────╮
 │ XLI v0.1.0  ·  my-app                                    │
-│ orchestrator: grok-4  ·  worker: grok-4-1-fast-non-reasoning │
+│ orchestrator: grok-4.20-reasoning  ·  worker: grok-4-1-fast-non-reasoning │
 │ collection: collection_abc123  ·  pool: 9 key(s)         │
-│ /exit · /sync · /reset · /plan · /execute · /cancel · /cost │
+│ type /help for slash commands                            │
 ╰──────────────────────────────────────────────────────────╯
 
 ›
@@ -171,19 +153,26 @@ Talk to it like Claude Code:
 › investigate every .py file in src/ in parallel and summarize each
 ```
 
-After every turn that mutates files, dirty paths are pushed to the collection automatically.
+After every turn that mutates files, dirty paths sync to the collection automatically.
 
-### REPL slash commands
+### Code REPL — slash commands
 
 | Command | Effect |
 |---|---|
-| `/exit`, `/quit` | leave the REPL |
-| `/sync` | force a full sync now |
-| `/reset` | clear conversation history (keeps system prompt) |
-| `/plan` | enter plan mode — read-only investigation, produces a plan |
-| `/execute` | exit plan mode and carry out the plan with full tools |
-| `/cancel` | exit plan mode without executing |
-| `/cost` | print the pricing table and which active models are covered |
+| `/help` | Show this list |
+| `/exit`, `/quit` | Leave the REPL |
+| `!<shell>` | Run a shell command **locally** (no chat turn, no tokens). Output streams to your terminal. Use for `clear`, `ls`, ad-hoc utilities. |
+| `/sync` | Force a full sync now |
+| `/reset` | Clear conversation history (keeps system prompt) |
+| `/plan` | Enter plan mode — read-only investigation, produces a numbered plan |
+| `/execute` | Exit plan mode and carry out the plan with full tools |
+| `/cancel` | Exit plan mode without executing |
+| `/cost` | Print pricing table + which active models are covered |
+| `/models` | Show current orchestrator + worker models and temperatures |
+| `/temp <0.0..2.0>` | Override orchestrator temperature for the next turn only |
+| `/yolo` / `/safe` | Toggle bash confirmation gate |
+| `/status` | Show project state (collection, pool, mode flags, plan/yolo status) |
+| `/projects` | List registered projects (current marked ●) |
 
 **Plan mode example:**
 
@@ -199,6 +188,96 @@ plan approved — executing
 ... agent now has write_file/edit_file/bash and carries out the plan ...
 ```
 
+### Tools available to the agent
+
+**File ops (project-scoped):** `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `bash`
+
+**RAG search:** `search_project` (hybrid retrieval over the project's Collection — disabled in `--local` mode)
+
+**xAI server-side tools** (Responses API, sub-calls):
+- `web_search` — Live web search via xAI Live Search; returns answer + citations
+- `x_search` — Search posts on X (Twitter), with handle/date filters
+- `code_execute` — Run Python in xAI's sandbox (NumPy/Pandas/Matplotlib/SciPy preinstalled)
+
+**Worker dispatch:** `dispatch_subagent` — fire one or more read-only investigators in parallel, each on its own API key
+
+---
+
+## Chat REPL — `xli chat`
+
+Persona-based conversation with persistent memory. Each persona is a Collection-backed XLI project under the hood — recent turns inline as history, older turns RAG-searchable forever.
+
+### Persona lifecycle
+
+```bash
+xli chat --new bob          # create persona "bob"; opens $EDITOR on its prompt
+xli chat bob                # start a session as bob
+xli chat                    # most-recently-used persona (or auto-create "default")
+xli chat --list             # all personas
+xli chat --edit bob         # re-open prompt in $EDITOR
+xli chat --delete bob       # delete prompt + state dir (with y/N confirm)
+```
+
+### Storage layout
+
+- `~/.config/xli/personas/<name>.md` — the persona's system prompt (config — hand-editable)
+- `~/.config/xli/personas/.last-used` — tracks the default persona for naked `xli chat`
+- `~/.xli/chat/<name>/` — per-persona project root (Collection-backed)
+- `~/.xli/chat/<name>/turns/<ts>.md` — one markdown file per conversation turn (synced to the Collection)
+
+### Memory model
+
+- **Short-term:** the most recent **20 turns** load inline as history at session start (free recall)
+- **Long-term:** older turns stay on disk and in the persona's Collection, reachable via the `search_project` tool ("what did we talk about regarding the migration last week?")
+
+The persona's system prompt is appended with a small fixed footer telling the model it has memory + the standard tools. Edit only the persona's voice; tool awareness is automatic.
+
+### Chat REPL — slash commands
+
+| Command | Effect |
+|---|---|
+| `/help` | Show this list |
+| `/exit`, `/quit` | Leave the REPL |
+| `!<shell>` | Run a shell command locally (no chat turn, no tokens) |
+| `/persona <name>` | Switch persona (saves current state, loads new one's prompt + last-N turns) |
+| `/personas` | List personas (current/last-used marked ●) |
+| `/edit` | Open current persona's prompt in `$EDITOR` (takes effect next session) |
+| `/forget` | Wipe current persona's transcript (with y/N confirm) — next sync propagates deletes to Collection |
+| `/sync` | Sync turn-files to the Collection now |
+| `/yolo` / `/safe` | Toggle bash confirmation gate |
+
+---
+
+## Scratch — `xli scratch`
+
+Ephemeral local-only project under `~/.xli/scratch/<name-or-timestamp>/`, drops you straight into chat.
+
+```bash
+xli scratch                 # auto-named with timestamp
+xli scratch foo             # named "foo"
+xli scratch --no-chat       # just create the project, don't enter REPL
+xli scratch --yolo          # pass --yolo to the REPL
+```
+
+For snapshotting an existing big directory (NAS, media collection), don't use scratch — instead run `xli init --local --snapshot` directly inside that directory.
+
+---
+
+## Shell passthrough — `!cmd`
+
+Both REPLs (`xli code` and `xli chat`) support `!<command>` for running shell commands **locally** without burning a chat turn. Example:
+
+```
+› !clear
+› !ls -la
+› !pwd
+› !git log --oneline -5
+```
+
+Output streams straight to your terminal (escape codes pass through, so `clear` and color output work). No history change, no tokens spent. The model never sees these.
+
+This is for utility commands you want to run yourself — when you want the agent to run something instead, just describe the task and let it use the `bash` tool with intent gating.
+
 ---
 
 ## Command reference
@@ -207,11 +286,13 @@ plan approved — executing
 
 | Command | What it does |
 |---|---|
-| `xli init [NAME] [--path PATH] [--collection-id ID] [--no-sync] [--force]` | Initialize a project. `NAME` defaults to cwd basename; `--path` defaults to cwd. |
+| `xli init [NAME] [--path PATH] [--collection-id ID] [--no-sync] [--force] [--local] [--snapshot]` | Initialize a project. `--local` skips Collection upload entirely; `--snapshot` caches a path/size index. |
 | `xli new <NAME> [--path PATH]` | Create a directory + initialize it in one step. |
+| `xli scratch [NAME] [--no-chat] [--yolo] [--force]` | Ephemeral local-only project under `~/.xli/scratch/`, drops into chat. |
 | `xli sync [PATH] [--dry-run]` | Push local changes to the collection (auto-runs after every mutating turn). |
-| `xli chat [TARGET]` | Start the REPL. `TARGET` can be a path or a registered project name. |
-| `xli status [PATH]` | Show config, key pool, models, project state, cost-tracking state. |
+| `xli code [TARGET] [--yolo]` | Project-scoped code REPL. `TARGET` can be a path or registered project name. |
+| `xli chat [NAME] [--new N \| --list \| --edit N \| --delete N] [--yolo]` | Persona-based conversation REPL with persistent memory. |
+| `xli status [PATH]` | Show config, key pool, models, temperatures, project state, cost-tracking state. |
 | `xli projects [FILTER]` | List every registered project; filter by substring. |
 
 ### Setup + key management
@@ -225,7 +306,7 @@ plan approved — executing
 | `xli keys rotate [--label LABEL]` | Rotate the secret on one (or all) keys; key ID stays the same. |
 | `xli keys expire --days N [--label LABEL]` | Update the `expireTime` on one (or all) keys. |
 | `xli keys revoke [--prefix LABEL] [--yes]` | Delete keys by label prefix (server-side + local config). |
-| `xli models list` | Show models the team has access to (requires `/v1/models` working — not all accounts). |
+| `xli models list` | Show models the team has access to. |
 | `xli models recommended` | Heuristic best-of-class picks (no commit). |
 | `xli models set [--orchestrator NAME] [--worker NAME]` | Pin orchestrator and/or worker model. |
 
@@ -234,12 +315,11 @@ plan approved — executing
 | Command | What it does |
 |---|---|
 | `xli gc [--dry-run] [--yes]` | Find orphan xAI Collections (project deleted from disk) and offer to delete them. |
+| `xli help` | Grouped command reference. |
 
 ---
 
 ## Configuration
-
-Two files, one persistent state directory per project.
 
 ### `~/.config/xli/config.json`
 
@@ -248,9 +328,11 @@ The single global config. `chmod 600` enforced. Example:
 ```json
 {
   "_comment": "...",
-  "orchestrator_model": "grok-4",
+  "orchestrator_model": "grok-4.20-reasoning",
   "worker_model": "grok-4-1-fast-non-reasoning",
   "model": "grok-4-1-fast-reasoning",
+  "orchestrator_temperature": 0.7,
+  "worker_temperature": 0.3,
   "team_id": "c13e6a5c-...",
   "keys": [
     {
@@ -269,37 +351,50 @@ The single global config. `chmod 600` enforced. Example:
 }
 ```
 
-**Important: `management_api_key` is NOT in this file.** It's read from `XAI_MANAGEMENT_API_KEY` env var only.
+**Important: `management_api_key` is NOT in this file.** Read from `XAI_MANAGEMENT_API_KEY` env only.
 
-`keys[0]` is always the primary (used for sync + main agent). Workers round-robin through the rest. Each entry can include an `api_key_id` (server-side ID, needed for rotate/expire) and `expire_time` (ISO timestamp).
+`keys[0]` is always the primary (used for sync + main agent). Workers round-robin through the rest.
+
+### `~/.config/xli/personas/<name>.md`
+
+Persona system prompts (one file per persona). Hand-editable.
 
 ### `~/.config/xli/projects.json`
 
-The global registry. Auto-maintained by `xli init`. Used by `xli projects` and `xli chat <name>` resolution.
+Global project registry. Auto-maintained by `xli init`.
 
 ### `<project>/.xli/`
 
 Per-project state, created by `xli init`:
 
-- `project.json` — collection ID, name, created timestamp, optional `extra_ignores`
+- `project.json` — collection ID (empty for `--local`), name, created timestamp, `local_only`, `extra_ignores`, `conversation_id` (xAI prompt-cache key)
 - `manifest.json` — `relpath → {sha256, mtime, file_id, last_synced}` for diff-based sync
+- `index.txt` — paths+sizes index when initialized with `--snapshot`
 - `repl_history` — that project's REPL command history
 
 ### `<project>/.xliignore` (optional)
 
-`.gitignore`-syntax extra patterns to skip during sync. Defaults already exclude `.git/`, `.xli/`, `venv/`, `node_modules/`, `__pycache__/`, etc.
+`.gitignore`-syntax extra patterns to skip during sync.
 
 ---
 
 ## Architecture
 
-**Sync.** On startup, `xli chat` walks the project (respecting `.gitignore` + `.xliignore`), diffs against the collection by sha256, and uploads/updates/removes deltas. After every turn that mutates files, dirty paths are flushed in the same way. Local disk is the source of truth; the collection is a mirror.
+**Sync.** On startup the REPL walks the project (respecting `.gitignore` + `.xliignore`), diffs against the collection by sha256, and uploads/updates/removes deltas. Mutating operations fan out across `max_parallel_workers` threads with 429 backoff per op. Empty files and binaries are skipped automatically. After every turn that mutates files, dirty paths flush. Local disk is the source of truth.
 
-**Swarm.** Tool calls in a single batch are classified as parallel-safe (reads, greps, search, worker dispatch) or sequential (writes, edits, bash). Parallel-safe calls fan out via a thread pool, capped by `max_parallel_workers`. Each `dispatch_subagent` worker pulls a chat key from a round-robin pool, runs its own contained tool loop with **read-only tools only**, and returns a tight summary. Workers cannot write, edit, or dispatch further workers.
+**Streaming.** Orchestrator chat completions stream via `stream=True`. Content deltas render through a `rich.Live` widget that re-renders Markdown progressively (headers, bold, code blocks, lists). Tool calls stream silently — they materialize as discrete `→ tool_name` events with green/red badges and dimmed result previews. The user sees both the answer flowing AND the work happening.
 
-**Plan mode.** When toggled on, the orchestrator's tool list is restricted to read-only investigation tools and a preamble is injected. The agent investigates and outputs a concrete numbered plan. `/execute` toggles plan mode off and replays "Execute the plan above" — the orchestrator now carries out the work with the full toolset.
+**Swarm.** Tool calls in a single batch are classified as parallel-safe (reads, greps, search_project, web_search, x_search, code_execute, dispatch_subagent) or sequential (writes, edits, bash). Parallel-safe calls fan out via a thread pool. Each `dispatch_subagent` worker pulls a chat key from a round-robin pool, runs its own contained tool loop with **read-only tools only**, returns a tight summary. Workers cannot write, edit, or dispatch further workers.
 
-**Cost.** Token usage from every completion is absorbed into the turn's stats. If `pricing` is configured, USD cost is computed as `(prompt_tokens / 1M) × in_rate + (completion_tokens / 1M) × out_rate`. Orchestrator and worker spend are tracked separately.
+**Server-side tools.** `web_search`, `x_search`, and `code_execute` are local function tools that internally fire one-shot Responses-API sub-calls (xAI moved these to Responses API only; Chat Completions Live Search is deprecated). Sub-call usage is tracked and absorbed into the turn's stats.
+
+**Plan mode.** Tool list is restricted to read-only investigation tools, a preamble is injected. Agent investigates and outputs a concrete numbered plan. `/execute` toggles back and replays "Execute the plan above" — agent now has the full toolset.
+
+**Hallucination guard.** After every turn, if the orchestrator's text contains a past-tense action verb (`verified`, `created`, `wrote`, `tested`, `installed`, `fixed`, etc.) but `tool_calls == 0`, a yellow `⚠ model said "X" but called 0 tools — verify before trusting` warning surfaces under the turn line.
+
+**Cost.** Token usage from every completion is absorbed into per-turn stats. Server-tool sub-calls (Responses API) include their own usage which is added to the orchestrator's tally. If `pricing` is configured, USD cost is computed per call with the actual model used. Orchestrator and worker spend tracked separately.
+
+**Personas.** Each persona is a Collection-backed XLI project at `~/.xli/chat/<name>/`. Recent turns load inline as history; older turns sync as `turns/<ts>.md` files and become RAG-searchable. Switching personas mid-chat saves the current state and reopens fresh on the new persona.
 
 **Registry + GC.** `xli init` writes an entry to `~/.config/xli/projects.json` (path → collection_id). `xli gc` cross-references the registry against the cloud's collection list and your filesystem to identify orphans.
 
@@ -311,12 +406,12 @@ Per-project state, created by `xli init`:
 
 **Chat keys are scoped, expiring, rotatable.** Each key created by `xli setup` / `xli bootstrap` has an `expireTime` (default 180 days) and named ACLs (`api-key:model:*`, `api-key:endpoint:*`). All chat keys are revocable via `xli keys revoke` (server-side + local).
 
-**Rotation without re-linking.** `xli keys rotate` calls the xAI rotation endpoint, which returns a new secret for the same `api_key_id`. The local config is updated in place. Nothing referencing the key needs to change.
+**Bash gating.** The agent's `bash` tool requires an honest `intent` declaration on every call (`read-only`, `modifies-project`, `modifies-system`, `network`). Riskier intents are gated on a y/N confirmation prompt unless `--yolo`/`/yolo` is set. Workers may only run `read-only` bash.
 
-**File perms.** `~/.config/xli/config.json` is `chmod 600`.
+**File perms.** `~/.config/xli/config.json` is `chmod 600`. Persona prompts and transcripts inherit normal user perms.
 
 **Public-release safety:**
-- Don't paste real API keys into chat logs (xAI auto-flags accounts when secrets appear in third-party model inputs)
+- Don't paste real API keys into chat logs
 - Rotate keys periodically (`xli keys rotate`)
 - Default 180-day expiry caps the blast radius if config.json leaks
 
@@ -324,23 +419,21 @@ Per-project state, created by `xli init`:
 
 ## Troubleshooting
 
-**`xli setup` says it couldn't auto-detect models.** Some xAI accounts don't expose the `/v1/models` endpoint or reject chat keys for that endpoint specifically. Workaround: set models manually with `xli models set`. The defaults (`grok-4-1-fast-reasoning` + `grok-4-1-fast-non-reasoning`) work for most accounts.
+**`xli setup` couldn't auto-detect models.** Some xAI accounts don't expose `/v1/models`. Workaround: `xli models set --orchestrator <name> --worker <name>`. Defaults work for most accounts.
 
-**`xli sync` fails with "Unknown field 'xli_sha256'".** Your collection was created before XLI declared its metadata fields. The sync code falls back to no-fields update automatically (you'll see a warning); long-term, re-init the project for clean schema-aware sync:
+**`web_search`, `x_search`, or `code_execute` errors with `'OpenAI' object has no attribute 'responses'`.** Your `openai` package is too old. Upgrade: `./venv/bin/pip install -U 'openai>=1.50'`.
 
-```bash
-rm -rf .xli/
-xli init
-xli gc                   # the old collection is now an orphan; delete it
-```
+**Sync fails with "Empty stream received".** Caused by 0-byte files. Already auto-skipped at the walk step. If you still see this, check whether the file size changed mid-sync.
 
-**Bootstrap throttled (429).** `xli bootstrap` retries with exponential backoff up to 5 times. If you're rapidly creating many keys, slow down or wait a few minutes.
+**Sync uploaded files I didn't expect (e.g., `.next/` build output).** Update to the latest XLI — its default ignore list now covers `.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.vercel/`, `.astro/`, `out/`, `target/`, `.cache/`, `coverage/` plus the previous Python/Node defaults. Re-run `xli sync` and the build files will be deleted from the Collection automatically.
 
-**Worker output looks wrapped weirdly.** Workers return summaries inside a header; the headers can wrap on narrow terminals. Cosmetic only.
+**Yellow `⚠ model said "created" but called 0 tools` warning.** The model claimed work without using any tools — likely a hallucination. Verify before trusting; ask follow-up questions to confirm the work actually happened.
 
-**Worker keys keep failing chat completions.** Check `xli keys list` — they may have expired (180-day default). `xli keys rotate` mints fresh secrets for the same key IDs.
+**Worker output looks weird.** Workers return summaries inside a `--- worker[label] · model · iters · tokens ---` header; the headers can wrap on narrow terminals. Cosmetic only.
 
-**Model auto-detection picks something weird.** It's a name-based heuristic. Override with `xli models set`.
+**Bootstrap throttled (429).** Retries with exponential backoff up to 5 times. If you're rapidly creating many keys, slow down or wait a few minutes.
+
+**Markdown rendering looks weird mid-stream.** Code blocks render as plain text until ``` closes (then snap to highlighted). That's a quirk of streaming Markdown — no clean fix.
 
 ---
 
@@ -350,36 +443,39 @@ xli gc                   # the old collection is now an orphan; delete it
 xli/
   __init__.py
   __main__.py
-  cli.py            REPL + every subcommand (init/sync/status/chat/config/setup/bootstrap/keys/models/projects/new/gc)
-  agent.py          Agent + WorkerAgent + parallel-safe tool batch executor
+  cli.py            REPLs (code + chat) + every subcommand
+  agent.py          Agent + WorkerAgent + streaming + tool previews + parallel batch executor
   tools.py          Tool implementations + JSON schemas + classification sets
-  sync.py           Project walker, manifest diff, upload/update/remove with field fallback
+  server_tools.py   Wrappers around xAI Responses-API server tools (web_search, x_search, code_execute)
+  sync.py           Project walker, manifest diff, parallel upload/update/remove with 429 backoff
   client.py         Clients factory (xai_sdk + openai → api.x.ai)
   pool.py           ClientPool (round-robin chat-key acquisition)
   config.py         GlobalConfig, ProjectConfig, KeyPair, template
-  bootstrap.py      Management-API REST helpers (create/rotate/expire/revoke/discover)
+  bootstrap.py      Management-API REST helpers (create/rotate/expire/revoke/discover/pick_best_models)
   cost.py           Cost + token formatters (no fabricated rates)
   manifest.py       Per-file sha256 / mtime / file_id record
   ignore.py         .gitignore + .xliignore + binary-skip walker
   registry.py       Global project registry
+  persona.py        Persona file management for `xli chat`
+  transcript.py     Per-turn conversation persistence for personas
 ```
 
 ---
 
 ## Uninstall / reset
 
-To completely wipe XLI state and start fresh:
-
 ```bash
 # Local state
 rm -rf ~/.config/xli/
+rm -rf ~/.xli/                # personas, scratch projects, chat transcripts
+
 # Per-project state (run in each project dir)
 rm -rf .xli/
 
 # Server-side: revoke every key XLI created
 xli bootstrap --revoke --prefix worker --yes
 xli bootstrap --revoke --prefix primary --yes
-# (You can also delete xli-prefixed collections via the xAI dashboard, or with `xli gc` if any registry entries remain)
+# (Delete xli-prefixed collections via the xAI dashboard, or with `xli gc`)
 ```
 
 ---
