@@ -6,7 +6,7 @@ __pycache__/
 build/
 dist/
 *.log
-README.md
+.gitignore
 
 # Local working stuff
 .claude/
@@ -14,3 +14,6 @@ README.md
 proposals/
 test/
 iXaac.code-workspace
+
+
+*.md
