@@ -7,4 +7,5 @@ dist/
 proposals/  
 .xli/
 .claude/
+.gitignore
 IXAAC.code-workspace
