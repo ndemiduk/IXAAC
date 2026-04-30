@@ -1,6 +1,6 @@
 # iXaac
 
-*Internal name: `xli` (the binary, the package, the on-disk directory). User-facing brand: **iXaac**. The codebase still uses `xli` everywhere because renaming internal references is churn for no benefit. Every command in this README starts with `xli` — that's what you type.*
+*Internal name: `xli` (the binary, the package, the on-disk directory). User-facing brand: **iXaac**. The codebase uses `xli`. Every command in this README starts with `xli` — that's what you type.*
 
 A **personal AI substrate** — not a coding agent, not a chatbot, not an MCP-style platform. A terminal program built on **xAI's Grok** and **xAI Collections** that grows with what you curate: personas, reference docs, API plugins, multi-machine fabric. The model and primitives are commodities; **your curation is the load-bearing layer.**
 
@@ -907,3 +907,4 @@ If you're a fresh agent session picking up this project:
 4. **Reasoning models are weaker at instruction-following.** When debugging "the doc/persona isn't sticking," check the model first.
 5. **Workers are read-only investigators.** Never propose giving them write access; that's a load-bearing safety property.
 6. **The user works incrementally and trusts the substrate to compose.** Ship small slices that work end-to-end; defer L2/L3 elaborations until L1 friction is real.
+
