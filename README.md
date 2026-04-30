@@ -1,4 +1,4 @@
-# XLI
+# IXAAC
 
 A terminal agent powered by **Grok**, with **xAI Collections** as the durable memory store. XLI ships with two complementary REPLs:
 

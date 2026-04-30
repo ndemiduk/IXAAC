@@ -31,6 +31,10 @@ class ToolContext:
     dirty_paths: set[str] = field(default_factory=set)
     yolo: bool = False      # skip per-intent confirmation gate when True
     is_worker: bool = False # workers cannot run intent > read-only
+    # Additional collection_ids to include in search_project alongside the
+    # project's own collection. Populated from Agent.attached_refs — the
+    # /ref slash command attaches persona memories for cross-session recall.
+    extra_collection_ids: list[str] = field(default_factory=list)
     # Server-tool sub-call usage (Responses API). Server tools fire one-shot
     # responses.create() calls outside the main chat loop; the agent drains
     # these accumulators after each tool batch into its CallStats.
@@ -333,10 +337,25 @@ def t_search_project(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = args["query"]
     limit = int(args.get("limit", 10))
     mode = args.get("retrieval_mode", ctx.cfg.retrieval_mode)
+
+    # Build the collection set: project's own + any /ref-attached personas.
+    # Filter empty (local-only projects have empty collection_id) and dedupe
+    # while preserving order so the project's own results come first.
+    seen: set[str] = set()
+    collection_ids: list[str] = []
+    for cid in [ctx.project.collection_id, *ctx.extra_collection_ids]:
+        if cid and cid not in seen:
+            seen.add(cid)
+            collection_ids.append(cid)
+    if not collection_ids:
+        return ToolResult(
+            "(no collections to search — local-only project with no /ref attachments)",
+            is_error=True,
+        )
     try:
         resp = ctx.clients.xai.collections.search(
             query=query,
-            collection_ids=[ctx.project.collection_id],
+            collection_ids=collection_ids,
             limit=limit,
             retrieval_mode=mode,
         )

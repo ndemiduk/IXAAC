@@ -306,6 +306,9 @@ class WorkerAgent:
     clients: Clients
     project: ProjectConfig
     cfg: GlobalConfig
+    # Inherits the parent agent's /ref attachments so workers dispatched for
+    # cross-cutting investigations search the same collection set.
+    extra_collection_ids: list[str] = field(default_factory=list)
 
     def run(self, task: str, context: Optional[str] = None) -> tuple[str, CallStats]:
         call = CallStats()
@@ -323,6 +326,7 @@ class WorkerAgent:
             cfg=self.cfg,
             pool=None,    # workers don't get a pool — no nested dispatch
             is_worker=True,
+            extra_collection_ids=list(self.extra_collection_ids),
         )
         schemas = worker_tool_schemas()
         if self.project.local_only:
@@ -410,6 +414,10 @@ class Agent:
     # One-shot temperature override applied to the next run_turn call only.
     # Set by the /temp slash command; cleared at the start of run_turn.
     next_turn_temp_override: Optional[float] = None
+    # Attached personas for cross-session memory recall. Each entry is
+    # (persona_name, collection_id). Populated by the /ref slash command;
+    # session-level state, not persisted across REPL restarts.
+    attached_refs: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.history:
@@ -453,6 +461,7 @@ class Agent:
             pool=self.pool,
             console=self.console,
             yolo=self.yolo,
+            extra_collection_ids=[cid for _, cid in self.attached_refs],
         )
         stats = TurnStats()
         stats.orch.model = self.cfg.get_model_for_role("orchestrator")
@@ -746,7 +755,10 @@ class Agent:
         context = args.get("context")
         worker_clients = self.pool.acquire()
         worker = WorkerAgent(
-            clients=worker_clients, project=self.project, cfg=self.cfg
+            clients=worker_clients,
+            project=self.project,
+            cfg=self.cfg,
+            extra_collection_ids=[cid for _, cid in self.attached_refs],
         )
         text, wcall = worker.run(task, context=context)
         from xli.cost import format_cost, format_tokens

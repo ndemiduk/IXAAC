@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(/home/birdman/Projects/XLI/venv/bin/python -c ' *)"
+      "Bash(/home/birdman/Projects/XLI/venv/bin/python -c ' *)",
+      "Bash(/home/birdman/Projects/XLI/venv/bin/python -m py_compile xli/*.py)",
+      "Bash(/home/birdman/Projects/XLI/venv/bin/python)"
     ]
   }
 }

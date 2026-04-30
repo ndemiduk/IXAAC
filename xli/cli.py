@@ -61,6 +61,79 @@ from xli.transcript import (
 CHAT_RECENT_TURNS = 20  # how many past turns to inline as history at chat start
 
 
+def _handle_ref_command(user_input: str, agent) -> bool:
+    """Handle `/ref` and `/unref` slash commands.
+
+    `/ref`            — list currently-attached personas (in-session state)
+    `/ref <name>`     — attach <name>'s collection to search_project
+    `/unref <name>`   — detach
+
+    Returns True if the input was handled, False otherwise (caller falls
+    through to the next slash dispatcher).
+    """
+    if not (user_input == "/ref" or user_input.startswith("/ref ") or
+            user_input == "/unref" or user_input.startswith("/unref ")):
+        return False
+
+    parts = user_input.split(maxsplit=1)
+    cmd = parts[0]
+
+    if cmd == "/ref":
+        if len(parts) == 1:
+            # List current attachments
+            if not agent.attached_refs:
+                console.print("[dim](no refs attached this session)[/dim]")
+                console.print("[dim]usage: [/dim][cyan]/ref <persona>[/cyan]"
+                              "[dim] to attach a persona's memory[/dim]")
+            else:
+                console.print("[bold]attached refs:[/bold]")
+                for name, cid in agent.attached_refs:
+                    short = cid[:24] + "…" if len(cid) > 24 else cid
+                    console.print(f"  · [cyan]{name}[/cyan]  [dim]{short}[/dim]")
+            return True
+
+        name = parts[1].strip()
+        if not is_valid_name(name):
+            console.print(f"[red]invalid persona name: {name!r}[/red]")
+            return True
+        persona = Persona(name)
+        if not persona.exists():
+            console.print(f"[red]no such persona: {name!r}[/red]  "
+                          f"[dim](create with [/dim][cyan]xli chat --new {name}[/cyan][dim])[/dim]")
+            return True
+        cid = persona.collection_id()
+        if not cid:
+            console.print(
+                f"[yellow]persona {name!r} has no Collection yet[/yellow] — "
+                f"run [cyan]xli chat {name}[/cyan] once to initialize it, then try again."
+            )
+            return True
+        if any(n == name for n, _ in agent.attached_refs):
+            console.print(f"[dim](already attached: {name})[/dim]")
+            return True
+        agent.attached_refs.append((name, cid))
+        console.print(
+            f"[green]✓[/green] attached [cyan]{name}[/cyan]'s memory — "
+            "[dim]search_project will now include their conversation history[/dim]"
+        )
+        return True
+
+    if cmd == "/unref":
+        if len(parts) != 2:
+            console.print("[dim]usage: [/dim][cyan]/unref <persona>[/cyan]")
+            return True
+        name = parts[1].strip()
+        before = len(agent.attached_refs)
+        agent.attached_refs = [(n, c) for n, c in agent.attached_refs if n != name]
+        if len(agent.attached_refs) == before:
+            console.print(f"[dim]no ref attached named {name!r}[/dim]")
+        else:
+            console.print(f"[green]✓[/green] detached [cyan]{name}[/cyan]")
+        return True
+
+    return False
+
+
 def _run_shell_passthrough(user_input: str, cwd: Path) -> bool:
     """Handle `!<command>` shell passthrough at the REPL prompt.
 
@@ -103,7 +176,9 @@ SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /safe                 Re-enable bash gate
   /models               Show current models + temperatures
   /temp <0.0..2.0>      Override orchestrator temp for the next turn only
-  /status               Show project state (collection, pool, mode flags)
+  /ref [persona]        Attach a persona's memory to search_project (no arg = list)
+  /unref <persona>      Detach a previously-attached persona
+  /status               Show project state (collection, pool, mode flags, refs)
   /projects             List registered projects (current marked ●)
 
 [dim]Admin commands (setup, keys, bootstrap, gc, models set) are CLI-only.[/dim]
@@ -1403,6 +1478,8 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             return 0
         if _run_shell_passthrough(user_input, project.project_root):
             continue
+        if _handle_ref_command(user_input, agent):
+            continue
         if user_input == "/help":
             console.print(CHAT_SLASH_HELP)
             continue
@@ -1506,6 +1583,8 @@ CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
   /personas             List personas
   /edit                 Open current persona's prompt in $EDITOR
   /forget               Wipe current persona's transcript (with y/N confirm)
+  /ref [persona]        Attach another persona's memory to this session (no arg = list)
+  /unref <persona>      Detach a previously-attached persona
   /sync                 Sync turn-files to the Collection now
   /yolo / /safe         Toggle bash confirmation gate
 
@@ -1579,6 +1658,8 @@ def cmd_code(args: argparse.Namespace) -> int:
             return 0
         if _run_shell_passthrough(user_input, project.project_root):
             continue
+        if _handle_ref_command(user_input, agent):
+            continue
         if user_input == "/help":
             console.print(SLASH_HELP)
             continue
@@ -1634,6 +1715,11 @@ def cmd_code(args: argparse.Namespace) -> int:
             console.print(f"  pool:          {len(pool)} key(s)")
             console.print(f"  plan mode:     {'[yellow]ON[/yellow]' if agent.plan_mode else 'off'}")
             console.print(f"  yolo:          {'[red]ON[/red]' if agent.yolo else 'off'}")
+            if agent.attached_refs:
+                names = ", ".join(n for n, _ in agent.attached_refs)
+                console.print(f"  attached refs: [cyan]{names}[/cyan]")
+            else:
+                console.print(f"  attached refs: [dim](none)[/dim]")
             continue
         if user_input == "/projects":
             reg = Registry.load()

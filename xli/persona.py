@@ -102,6 +102,22 @@ class Persona:
                 return line[:100]
         return "(empty)"
 
+    def collection_id(self) -> Optional[str]:
+        """Return this persona's xAI collection_id, or None if not yet
+        initialized. The persona project (and its Collection) are created
+        lazily on first `xli chat <name>` — until then there's nothing to
+        attach to."""
+        proj_json = self.project_root / ".xli" / "project.json"
+        if not proj_json.exists():
+            return None
+        import json
+        try:
+            data = json.loads(proj_json.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        cid = data.get("collection_id")
+        return cid if cid else None
+
     def touch_used(self) -> None:
         """Record that this persona was used most recently. Used for naked
         `xli chat` (no name) to pick the right persona."""
