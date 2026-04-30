@@ -5,7 +5,7 @@ A terminal agent powered by **Grok**, with **xAI Collections** as the durable me
 - **`xli code`** — project-scoped coding agent (read/write files, run tests, dispatch parallel workers, mandatory verification before declaring success)
 - **`xli chat`** — persona-based conversational agent with persistent memory (each persona has its own Collection; old turns are searchable forever via RAG)
 
-Plus a quick-launch ephemeral mode (`xli scratch`) and a local-only mode (`xli init --local`) for "Midnight Commander on steroids" file-management workflows in directories you don't want to upload.
+Plus a quick-launch ephemeral mode (`xli scratch`) and a local-only mode (`xli init --local`) for file-management workflows in directories you don't want to upload.
 
 It's a Claude-Code-shaped CLI built on the cheaper xAI stack, with:
 
