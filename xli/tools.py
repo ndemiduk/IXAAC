@@ -21,6 +21,49 @@ from xli.config import GlobalConfig, ProjectConfig
 MAX_OUTPUT_BYTES = 30_000
 
 
+# Defense-in-depth: shell commands declared as `intent=read-only` get scanned
+# for obvious mutation patterns. The intent declaration is honor-system —
+# without this check, a worker (or any agent) could declare read-only and
+# still run `rm -rf`, `git push`, or a package install. This list raises the
+# bar from honor-system to "well-known mutation patterns refused at the tool
+# layer." It cannot catch all obfuscation (eval $(...), base64-encoded
+# payloads, etc.) — only real sandboxing solves that. The point is to
+# eliminate the casual / accidental case.
+#
+# Each entry is (regex, human-readable reason). Patterns anchor at "command
+# position" — start of input, or after a separator (; & | \n ( etc.) — so
+# embedded substrings like `grep 'rm -rf' .` don't false-positive.
+_WORKER_CMD_BOUNDARY = r"(?:^|[;&|\n(`])"
+
+WORKER_FORBIDDEN_PATTERNS: list[tuple[str, str]] = [
+    # File mutation commands at command position
+    (rf"{_WORKER_CMD_BOUNDARY}\s*(?:rm|mv|cp|touch|dd|tee|chmod|chown|mkdir|mkfifo|ln|truncate|shred)\b", "file-mutating command"),
+    # In-place text editors (sed without -i is read-only)
+    (r"\bsed\s+-[a-zA-Z]*i\b", "sed -i (in-place edit)"),
+    (r"\bsed\s+--in-place\b", "sed --in-place"),
+    (r"\bawk\s+.*-i\s+inplace\b", "awk -i inplace"),
+    # Process control
+    (rf"{_WORKER_CMD_BOUNDARY}\s*(?:kill|killall|pkill)\b", "process-control command"),
+    # Package managers (install / publish / etc.)
+    (rf"{_WORKER_CMD_BOUNDARY}\s*(?:pip3?|npm|pnpm|yarn|apt(?:-get)?|dnf|yum|brew|cargo|gem|go|composer|gradle|mvn|gh)\s+(?:install|add|update|upgrade|remove|uninstall|publish)\b", "package-manager mutation"),
+    # VCS write subcommands
+    (r"\bgit\s+(?:commit|push|checkout|reset|clean|rebase|merge|add|rm|mv|cherry-pick|revert|stash|init|am)\b", "git mutating subcommand"),
+    # Shell-string execution helpers — these can hide anything above
+    (rf"{_WORKER_CMD_BOUNDARY}\s*(?:eval|exec|source)\s", "eval/exec/source (shell-string execution)"),
+    (rf"{_WORKER_CMD_BOUNDARY}\s*\.\s+\S", "dot-source"),
+]
+
+
+def _check_read_only_command(cmd: str) -> tuple[bool, str]:
+    """Return (ok, reason). ok=False means cmd contains an obvious mutation
+    pattern that should not be running under intent=read-only. reason names
+    which class of mutation tripped."""
+    for pattern, reason in WORKER_FORBIDDEN_PATTERNS:
+        if re.search(pattern, cmd):
+            return (False, reason)
+    return (True, "")
+
+
 @dataclass
 class ToolContext:
     project: ProjectConfig
@@ -116,6 +159,30 @@ def _mark_dirty(ctx: ToolContext, path: Path) -> None:
     ctx.dirty_paths.add(rel)
 
 
+def _ignore_spec(ctx: ToolContext):
+    """Lazily load + cache the project's ignore spec on the ToolContext.
+    Used by the read tools (read_file, grep, glob) so that .env, secrets,
+    .gitignored content, build outputs, etc. are not silently exposed to the
+    agent — same surface that the sync engine excludes from the Collection.
+    """
+    spec = getattr(ctx, "_ignore_spec_cache", None)
+    if spec is None:
+        from xli.ignore import load_ignore_spec
+        extras = list(getattr(ctx.project, "extra_ignores", None) or [])
+        spec = load_ignore_spec(ctx.project.project_root, extras)
+        # Stash on the context so subsequent tools in the same turn reuse it.
+        ctx._ignore_spec_cache = spec
+    return spec
+
+
+def _is_ignored(ctx: ToolContext, relpath: str) -> bool:
+    """Check whether a project-relative path matches the ignore spec.
+    Tests both file form ("foo/bar.env") and dir form ("foo/bar/") so that
+    directory rules like ".env/" cover their contents too."""
+    spec = _ignore_spec(ctx)
+    return spec.match_file(relpath) or spec.match_file(relpath + "/")
+
+
 # --------------------------------------------------------------------------- #
 #  Tool implementations
 # --------------------------------------------------------------------------- #
@@ -126,6 +193,16 @@ def t_read_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(f"file not found: {args['path']}", is_error=True)
     if not path.is_file():
         return ToolResult(f"not a file: {args['path']}", is_error=True)
+    rel = path.relative_to(ctx.project.project_root.resolve()).as_posix()
+    if _is_ignored(ctx, rel):
+        return ToolResult(
+            f"refused: {args['path']} is in the project's ignore list "
+            "(.gitignore / .xliignore / built-in defaults). Likely contains "
+            "secrets, build artifacts, or non-content data the user does not "
+            "want exposed. If you genuinely need this file, ask the user — "
+            "they can move it or whitelist it via .xliignore negation rules.",
+            is_error=True,
+        )
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
@@ -184,11 +261,19 @@ def t_list_dir(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 def t_glob(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     pattern = args["pattern"]
     root = ctx.project.project_root
-    matches = sorted(
-        p.relative_to(root).as_posix()
-        for p in root.rglob("*")
-        if p.is_file() and fnmatch.fnmatch(p.relative_to(root).as_posix(), pattern)
-    )
+    matches = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        if not fnmatch.fnmatch(rel, pattern):
+            continue
+        # Same ignore filter as sync — keeps secrets / build outputs out of
+        # results even though glob is read-only.
+        if _is_ignored(ctx, rel):
+            continue
+        matches.append(rel)
+    matches.sort()
     if not matches:
         return ToolResult("(no matches)")
     return ToolResult(_truncate("\n".join(matches)))
@@ -210,6 +295,10 @@ def t_grep(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             continue
         rel = path.relative_to(root).as_posix()
         if glob_pat and not fnmatch.fnmatch(rel, glob_pat):
+            continue
+        # Skip ignored paths so grep can't surface .env / build / secrets
+        # content the sync engine excludes from the Collection.
+        if _is_ignored(ctx, rel):
             continue
         try:
             with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -243,6 +332,21 @@ def t_bash(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             f"got {intent!r}. Report this back to the orchestrator instead.",
             is_error=True,
         )
+
+    # Defense-in-depth on top of the honor-system intent gate: when the agent
+    # declares read-only, scan for obvious mutation patterns. Catches the
+    # casual case where a worker (or orchestrator) misclassifies a write as
+    # read-only. Doesn't catch obfuscation — that needs real sandboxing.
+    if intent == INTENT_READ_ONLY:
+        ok, reason = _check_read_only_command(cmd)
+        if not ok:
+            return ToolResult(
+                f"bash refused: command matches a known mutation pattern "
+                f"({reason}) but intent={intent!r}. Re-declare with the "
+                "appropriate non-read-only intent, or rephrase if this is "
+                "genuinely read-only and the pattern matched in error.",
+                is_error=True,
+            )
 
     # Reasoning models occasionally emit HTML-escaped bash (`&amp;` for `&`,
     # `&lt;&lt;&lt;` for `<<<`, etc.) — silently breaks heredocs and URLs in

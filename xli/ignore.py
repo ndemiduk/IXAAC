@@ -46,6 +46,17 @@ DEFAULT_IGNORES = [
 ]
 
 
+# Force-include carve-outs — applied LAST so user .gitignore patterns can't
+# accidentally re-ignore files iXaac depends on shipping to the Collection.
+# Specifically: archived plan investigations need to flow through sync to be
+# RAG-searchable. A user's `*.md` or `.xli/` line in .gitignore would otherwise
+# silently disable the plans-sync feature.
+FORCE_INCLUDE_PATTERNS = [
+    "!.xli/plans/",
+    "!.xli/plans/**",
+]
+
+
 def load_ignore_spec(project_root: Path, extra_patterns: list[str] | None = None) -> PathSpec:
     patterns = list(DEFAULT_IGNORES)
     for fname in (".gitignore", ".xliignore"):
@@ -57,6 +68,8 @@ def load_ignore_spec(project_root: Path, extra_patterns: list[str] | None = None
             )
     if extra_patterns:
         patterns.extend(extra_patterns)
+    # Carve-outs go last — user gitignore can't override these.
+    patterns.extend(FORCE_INCLUDE_PATTERNS)
     return PathSpec.from_lines("gitwildmatch", patterns)
 
 

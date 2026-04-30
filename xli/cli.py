@@ -306,6 +306,37 @@ def _attachment_tag(agent) -> str:
     return ("+" + "/".join(parts)) if parts else ""
 
 
+def _truncate_names(names: list[str], max_show: int = 4) -> str:
+    """Render a name list compactly: 'a, b, c' or 'a, b, c, +N more'."""
+    if len(names) <= max_show:
+        return ", ".join(names)
+    return ", ".join(names[:max_show]) + f", +{len(names) - max_show} more"
+
+
+def _status_toolbar(agent) -> Optional[str]:
+    """Bottom-toolbar text pinned below the prompt during composition.
+
+    Shows the dynamic session state — mode flags + the names of attached
+    refs/docs — so the user always knows what's in scope while typing the
+    next message. Returns None when there's nothing to show, which causes
+    prompt_toolkit to skip rendering the toolbar line entirely.
+    """
+    parts: list[str] = []
+    if agent.plan_mode:
+        parts.append("mode: plan")
+    if agent.yolo:
+        parts.append("YOLO")
+    if agent.attached_refs:
+        names = [n for n, _ in agent.attached_refs]
+        parts.append("refs: " + _truncate_names(names))
+    if agent.attached_docs:
+        names = [n for n, _ in agent.attached_docs]
+        parts.append("docs: " + _truncate_names(names))
+    if not parts:
+        return None
+    return "  ·  ".join(parts)
+
+
 def _archive_plan_notes(project: ProjectConfig, *, label: str) -> Optional[Path]:
     """Move .xli/plan-notes.md to .xli/plans/<label>-<timestamp>.md.
 
@@ -2237,12 +2268,28 @@ def cmd_ask(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"warning: pre-run sync failed: {e}", file=sys.stderr)
 
-    agent = Agent(pool=pool, project=project, cfg=cfg, console=console, yolo=False)
+    # `xli ask` is non-interactive (driven by the XMPP daemon's agent fallback,
+    # plus any other headless caller). Pass console=None so the bash-tool gate
+    # refuses risky intents cleanly with a tool error — instead of trying to
+    # call input() on a TTY that doesn't exist and blocking until timeout.
+    # Agents in this path also can't be given yolo: there's no human watching
+    # to revoke an "rm -rf" if the model decides it's fine.
+    agent = Agent(pool=pool, project=project, cfg=cfg, console=None, yolo=False)
     try:
-        reply, _modified, _stats = agent.run_turn(args.prompt)
+        reply, modified, _stats = agent.run_turn(args.prompt)
     except Exception as e:
         print(f"error: agent run failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
+
+    # Push any file edits the agent made to the Collection so the project's
+    # remote state stays consistent. The REPL syncs at end of every turn; ask
+    # was previously dropping `modified` on the floor, leaving Collection stale
+    # after daemon-initiated edits.
+    if modified and not project.local_only:
+        try:
+            sync_project(pool.primary(), project, cfg)
+        except Exception as e:
+            print(f"warning: post-run sync failed: {e}", file=sys.stderr)
 
     print(reply)
     return 0
@@ -2472,7 +2519,10 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
     load_attached_docs(project, agent)
 
     history_path = project.xli_dir / "repl_history"
-    session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
+    session: PromptSession[str] = PromptSession(
+        history=FileHistory(str(history_path)),
+        bottom_toolbar=lambda: _status_toolbar(agent),
+    )
 
     yolo_banner = "  ·  [red]YOLO[/red]" if agent.yolo else ""
     memory_line = (
@@ -2699,7 +2749,10 @@ def cmd_code(args: argparse.Namespace) -> int:
     load_attached_docs(project, agent)
 
     history_path = project.xli_dir / "repl_history"
-    session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
+    session: PromptSession[str] = PromptSession(
+        history=FileHistory(str(history_path)),
+        bottom_toolbar=lambda: _status_toolbar(agent),
+    )
 
     yolo_banner = "  ·  [red]YOLO[/red]" if agent.yolo else ""
     local_banner = "  ·  [magenta]LOCAL[/magenta]" if project.local_only else ""
