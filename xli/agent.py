@@ -18,7 +18,6 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from rich.console import Console
-from rich.live import Live
 from rich.markdown import Markdown
 
 from xli.client import Clients
@@ -629,7 +628,8 @@ class Agent:
     ) -> tuple[Any, Any, bool]:
         """One orchestrator chat-completions call, streamed.
 
-        Streams content deltas as plain text live, snaps to Markdown at end. Tool-call deltas are
+        Streams content deltas progressively as plain text (console.print with end=""),
+        then renders a single final Markdown once at the end. Tool-call deltas are
         accumulated silently — the user sees discrete tool events (with
         previews) in the next phase. Returns (msg, usage, streamed_text)
         in the same shape the non-streaming code expects:
@@ -660,67 +660,54 @@ class Agent:
         reasoning_parts: list[str] = []
         tool_buf: dict[int, dict[str, str]] = {}
         usage: Any = None
-        live: Optional[Live] = None
         streamed_any = False
+        content_started = False
 
-        try:
-            for chunk in stream:
-                # Final usage chunk arrives once stream_options.include_usage is set.
-                if getattr(chunk, "usage", None) is not None:
-                    usage = chunk.usage
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
+        for chunk in stream:
+            # Final usage chunk arrives once stream_options.include_usage is set.
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
 
-                # Reasoning content from reasoning models. Don't render live —
-                # treat it as private thinking. Surface it after the stream
-                # ends *only if* no actual content arrived (diagnostic mode).
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    reasoning_parts.append(reasoning)
+            # Reasoning content from reasoning models. Don't render live —
+            # treat it as private thinking. Surface it after the stream
+            # ends *only if* no actual content arrived (diagnostic mode).
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                reasoning_parts.append(reasoning)
 
-                if getattr(delta, "content", None):
-                    if live is None:
-                        # Blank line before the answer; open the Live widget
-                        # lazily so iterations with only tool_calls emit
-                        # nothing visible from this helper.
-                        self.console.print()
-                        live = Live(
-                            "",
-                            console=self.console,
-                            refresh_per_second=10,
-                            vertical_overflow="visible",
-                        )
-                        live.start()
-                        streamed_any = True
-                    # Accumulate incremental delta.content to build full text.
-                    current_content += delta.content
-                    # Update with plain text for smooth streaming without re-renders.
-                    live.update(current_content)
+            if getattr(delta, "content", None):
+                if not content_started:
+                    # Blank line before the answer (matches previous behavior).
+                    self.console.print()
+                    content_started = True
+                    streamed_any = True
+                # Accumulate incremental delta.content to build full text.
+                current_content += delta.content
+                # Progressive plain-text streaming (safe, no Live redraw issues).
+                self.console.print(delta.content, end="", highlight=False)
 
-                if getattr(delta, "tool_calls", None):
-                    for tcd in delta.tool_calls:
-                        idx = tcd.index
-                        buf = tool_buf.setdefault(
-                            idx, {"id": "", "name": "", "arguments": ""}
-                        )
-                        if getattr(tcd, "id", None):
-                            buf["id"] = tcd.id
-                        fn = getattr(tcd, "function", None)
-                        if fn is not None:
-                            if getattr(fn, "name", None):
-                                buf["name"] += fn.name
-                            if getattr(fn, "arguments", None):
-                                buf["arguments"] += fn.arguments
-        finally:
-            pass  # Live will be stopped after final update
+            if getattr(delta, "tool_calls", None):
+                for tcd in delta.tool_calls:
+                    idx = tcd.index
+                    buf = tool_buf.setdefault(
+                        idx, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(tcd, "id", None):
+                        buf["id"] = tcd.id
+                    fn = getattr(tcd, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            buf["name"] += fn.name
+                        if getattr(fn, "arguments", None):
+                            buf["arguments"] += fn.arguments
 
-        # Snap to Markdown for final formatting if content was streamed.
-        if streamed_any and current_content and live is not None:
-            live.update(Markdown(current_content))
-            live.stop()
-        elif live is not None:
-            live.stop()
+        # Single final Markdown render for nicely formatted output.
+        if streamed_any and current_content:
+            self.console.print()
+            self.console.print(Markdown(current_content))
 
         # If a reasoning model produced thinking tokens but no actual content
         # and no tool_calls, the user would see nothing — surface the
