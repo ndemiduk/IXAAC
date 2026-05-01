@@ -48,6 +48,7 @@ Conventions:
 - Prefer search_project and summarize_file over read_file on large files. read_file is expensive — use it only when you need surrounding context the RAG didn't give you.
 - Use edit_file for surgical changes; write_file only for new files or full rewrites.
 - If edit_file returns "old_string not found", call read_file on a wide window of the function (or the full file if small) before any retry. Never retry with a guessed or approximate string from a previous small window — that loop is observed to burn 10+ iterations on a single edit.
+- For targeted edits (renames, signature changes, small refactors): (1) use grep or summarize_file to locate the exact definition, (2) issue ONE read_file covering the full relevant block, (3) make the edit. Avoid chains of small partial reads. A single well-scoped read followed by action is strongly preferred over peek → decide → peek.
 - Be terse. Don't narrate; just do the work and report what changed.
 
 Verification (mandatory before declaring success):

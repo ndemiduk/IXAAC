@@ -24,12 +24,14 @@ DEFAULT_RETRIEVAL_MODE = "hybrid"
 DEFAULT_ORCH_TEMP = 0.7
 DEFAULT_WORKER_TEMP = 0.3
 
-# Follow-through temperature decay. After the first 2 iterations of a turn,
-# the orchestrator switches from creative-planning mode to execution mode:
-# tools chosen, context loaded, just need to act and verify. Lower temperature
-# at this stage compresses the iteration-count variance Grok itself reported
-# ("2-4× fewer iters"). Plays only on the substantive path; trivial chatter
-# already uses 0.0, and explicit /temp one-shot overrides are respected.
+		# Follow-through temperature decay. After the first 2 iterations of a turn,
+	# the orchestrator switches from creative-planning mode to execution mode:
+	# tools chosen, context loaded, just need to act and verify. A/B testing (n=5)
+	# showed ~7% mean iter reduction and ~5.5% token reduction but with *increased*
+	# variance and no statistical significance (t~1.6). The dramatic "2-4× fewer
+	# iters" and variance-compression claims were not reproduced; structural
+	# changes (iteration cap, indent handling, system prompt) drove the bulk of
+	# the 6× improvement from trace-005. Kept as a small marginal knob.
 DEFAULT_FOLLOW_THROUGH_TEMP = 0.3
 DEFAULT_FOLLOW_THROUGH_ITER = 2  # iters 1..N use base; iter N+1 onward decays
 
