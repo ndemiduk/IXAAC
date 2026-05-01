@@ -11,7 +11,9 @@ Two flavors:
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -259,6 +261,21 @@ class CallStats:
         if c is not None:
             self.cost_usd = (self.cost_usd or 0.0) + c
 
+
+def _extract_cached_tokens(usage) -> int:
+    """Pull cached prompt-token count from a chat.completions usage object.
+
+    OpenAI-compatible APIs (xAI included) expose this under
+    `usage.prompt_tokens_details.cached_tokens`. Returns 0 when missing,
+    so callers can treat absence as "no cache info" without branching.
+    """
+    if usage is None:
+        return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return 0
+    return getattr(details, "cached_tokens", 0) or 0
+
     def absorb_server_tool(
         self, prompt_tokens: int, completion_tokens: int, cost: float
     ) -> None:
@@ -279,6 +296,49 @@ class CallStats:
 
 
 @dataclass
+class IterStats:
+    """Per-iteration measurement for the orchestrator loop.
+
+    Captured only when XLI_PROFILE=1 is set in the environment; the list stays
+    empty otherwise so the dataclass cost is one allocation per turn.
+    """
+    n: int                              # 1-based iteration index within the turn
+    prompt_tokens: int = 0              # API-reported input tokens for this call
+    completion_tokens: int = 0          # API-reported output tokens
+    cached_tokens: int = 0              # subset of prompt_tokens served from prompt cache
+    history_msgs_before: int = 0        # len(history) at call entry
+    history_chars_before: int = 0       # rough volume sent (sum of message content lengths)
+    tool_names: list[str] = field(default_factory=list)  # tools the model emitted this iter
+    duration_s: float = 0.0             # wall time for the streamed call
+
+
+def _profile_enabled() -> bool:
+    """Cheap, env-driven gate for per-iter measurement and reporting."""
+    return os.environ.get("XLI_PROFILE", "").strip() not in ("", "0", "false", "False")
+
+
+def _history_chars(history: list[dict[str, Any]]) -> int:
+    """Cheap upper-bound on history bytes — sums string content fields.
+
+    Not a true token count; meant to track *growth* across iterations so we
+    can spot the O(n²) accumulation pattern without paying for a tokenizer.
+    """
+    total = 0
+    for m in history:
+        c = m.get("content")
+        if isinstance(c, str):
+            total += len(c)
+        tcs = m.get("tool_calls")
+        if isinstance(tcs, list):
+            for tc in tcs:
+                fn = tc.get("function") if isinstance(tc, dict) else None
+                if isinstance(fn, dict):
+                    total += len(fn.get("name") or "")
+                    total += len(fn.get("arguments") or "")
+    return total
+
+
+@dataclass
 class TurnStats:
     orch: CallStats = field(default_factory=CallStats)
     workers: CallStats = field(default_factory=CallStats)
@@ -286,6 +346,9 @@ class TurnStats:
     workers_dispatched: int = 0
     server_tool_calls: int = 0  # web_search / x_search / code_execute sub-calls
     warnings: list[str] = field(default_factory=list)
+    # Populated only when XLI_PROFILE=1; lets us see per-iteration prompt growth
+    # so we can identify which optimization lever actually moves the curve.
+    iters: list[IterStats] = field(default_factory=list)
 
     @property
     def model(self) -> str:
@@ -729,8 +792,18 @@ class Agent:
         else:
             temperature = self.cfg.orchestrator_temp()
 
+        profile_on = _profile_enabled()
         for _ in range(self.cfg.max_tool_iterations):
             stats.orch.iterations += 1
+            iter_idx = stats.orch.iterations
+
+            # Snapshot history shape *before* the call so we can attribute
+            # prompt-growth to whatever this iteration is about to send.
+            if profile_on:
+                pre_msgs = len(self.history)
+                pre_chars = _history_chars(self.history)
+                t_start = time.perf_counter()
+
             msg, usage, streamed = self._stream_orchestrator_iteration(
                 model=model,
                 schemas=schemas,
@@ -739,6 +812,34 @@ class Agent:
             )
             if usage is not None:
                 stats.orch.absorb_usage(usage, model, self.cfg.pricing)
+
+            if profile_on:
+                p_tok = (
+                    getattr(usage, "prompt_tokens", None)
+                    or getattr(usage, "input_tokens", None)
+                    or 0
+                ) if usage is not None else 0
+                c_tok = (
+                    getattr(usage, "completion_tokens", None)
+                    or getattr(usage, "output_tokens", None)
+                    or 0
+                ) if usage is not None else 0
+                tool_names = (
+                    [tc.function.name for tc in (msg.tool_calls or [])]
+                    if msg.tool_calls else []
+                )
+                stats.iters.append(
+                    IterStats(
+                        n=iter_idx,
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        cached_tokens=_extract_cached_tokens(usage),
+                        history_msgs_before=pre_msgs,
+                        history_chars_before=pre_chars,
+                        tool_names=tool_names,
+                        duration_s=time.perf_counter() - t_start,
+                    )
+                )
 
             entry: dict[str, Any] = {"role": "assistant"}
             if msg.content:

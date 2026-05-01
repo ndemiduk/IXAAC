@@ -934,6 +934,84 @@ def _format_turn_line(ts) -> str:
     return "[dim]" + " · ".join(parts) + "[/dim]"
 
 
+def _print_profile(ts, console: Console) -> None:
+    """Per-iteration breakdown for the orchestrator loop.
+
+    Only renders when XLI_PROFILE=1 and the agent recorded iteration data
+    (workers and trivial-path turns may produce empty `iters`). Goal: surface
+    the prompt-growth curve so we can see which optimization knobs actually
+    move the needle on long, tool-heavy turns.
+    """
+    iters = getattr(ts, "iters", None) or []
+    if not iters:
+        return
+
+    from rich.table import Table
+
+    table = Table(
+        title="[bold]turn profile[/bold] (XLI_PROFILE=1)",
+        title_justify="left",
+        header_style="bold dim",
+        box=None,
+        padding=(0, 1),
+    )
+    table.add_column("iter", justify="right", style="dim")
+    table.add_column("prompt", justify="right")
+    table.add_column("cached", justify="right", style="green")
+    table.add_column("compl", justify="right")
+    table.add_column("hist_msgs", justify="right", style="dim")
+    table.add_column("hist_chars", justify="right", style="dim")
+    table.add_column("dur(s)", justify="right", style="dim")
+    table.add_column("tools", style="cyan")
+
+    def _compact(n: int) -> str:
+        if n < 1000:
+            return str(n)
+        if n < 1_000_000:
+            return f"{n / 1000:.1f}k"
+        return f"{n / 1_000_000:.2f}M"
+
+    cum_prompt = 0
+    cum_compl = 0
+    cum_cached = 0
+    for it in iters:
+        cum_prompt += it.prompt_tokens
+        cum_compl += it.completion_tokens
+        cum_cached += it.cached_tokens
+        cache_pct = (
+            f"{it.cached_tokens / it.prompt_tokens * 100:.0f}%"
+            if it.prompt_tokens else "—"
+        )
+        cached_cell = (
+            f"{_compact(it.cached_tokens)} ({cache_pct})"
+            if it.cached_tokens else "—"
+        )
+        tools = ",".join(it.tool_names) if it.tool_names else "[dim](final)[/dim]"
+        if len(tools) > 60:
+            tools = tools[:57] + "…"
+        table.add_row(
+            str(it.n),
+            _compact(it.prompt_tokens),
+            cached_cell,
+            _compact(it.completion_tokens),
+            str(it.history_msgs_before),
+            _compact(it.history_chars_before),
+            f"{it.duration_s:.2f}",
+            tools,
+        )
+
+    console.print(table)
+    cache_total_pct = (
+        f"{cum_cached / cum_prompt * 100:.0f}%"
+        if cum_prompt else "—"
+    )
+    console.print(
+        f"  [dim]totals: prompt {_compact(cum_prompt)} tok "
+        f"(cached {_compact(cum_cached)} = {cache_total_pct}) · "
+        f"compl {_compact(cum_compl)} tok · iters {len(iters)}[/dim]"
+    )
+
+
 def cmd_gc(args: argparse.Namespace) -> int:
     """List + (optionally) delete orphan xAI collections.
 
@@ -2686,6 +2764,7 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             console.print()
             console.print(text)
         console.print(_format_turn_line(turn_stats))
+        _print_profile(turn_stats, console)
         for warn in turn_stats.warnings:
             console.print(f"  [yellow]⚠ {warn}[/yellow]")
 
@@ -3012,6 +3091,7 @@ def cmd_code(args: argparse.Namespace) -> int:
             console.print()
             console.print(text)
         console.print(_format_turn_line(turn_stats))
+        _print_profile(turn_stats, console)
         for warn in turn_stats.warnings:
             console.print(f"  [yellow]⚠ {warn}[/yellow]")
 
