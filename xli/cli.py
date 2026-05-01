@@ -306,37 +306,6 @@ def _attachment_tag(agent) -> str:
     return ("+" + "/".join(parts)) if parts else ""
 
 
-def _truncate_names(names: list[str], max_show: int = 4) -> str:
-    """Render a name list compactly: 'a, b, c' or 'a, b, c, +N more'."""
-    if len(names) <= max_show:
-        return ", ".join(names)
-    return ", ".join(names[:max_show]) + f", +{len(names) - max_show} more"
-
-
-def _status_toolbar(agent) -> Optional[str]:
-    """Bottom-toolbar text pinned below the prompt during composition.
-
-    Shows the dynamic session state — mode flags + the names of attached
-    refs/docs — so the user always knows what's in scope while typing the
-    next message. Returns None when there's nothing to show, which causes
-    prompt_toolkit to skip rendering the toolbar line entirely.
-    """
-    parts: list[str] = []
-    if agent.plan_mode:
-        parts.append("mode: plan")
-    if agent.yolo:
-        parts.append("YOLO")
-    if agent.attached_refs:
-        names = [n for n, _ in agent.attached_refs]
-        parts.append("refs: " + _truncate_names(names))
-    if agent.attached_docs:
-        names = [n for n, _ in agent.attached_docs]
-        parts.append("docs: " + _truncate_names(names))
-    if not parts:
-        return None
-    return "  ·  ".join(parts)
-
-
 def _archive_plan_notes(project: ProjectConfig, *, label: str) -> Optional[Path]:
     """Move .xli/plan-notes.md to .xli/plans/<label>-<timestamp>.md.
 
@@ -2519,10 +2488,7 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
     load_attached_docs(project, agent)
 
     history_path = project.xli_dir / "repl_history"
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path)),
-        bottom_toolbar=lambda: _status_toolbar(agent),
-    )
+    session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
 
     yolo_banner = "  ·  [red]YOLO[/red]" if agent.yolo else ""
     memory_line = (
@@ -2749,10 +2715,7 @@ def cmd_code(args: argparse.Namespace) -> int:
     load_attached_docs(project, agent)
 
     history_path = project.xli_dir / "repl_history"
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path)),
-        bottom_toolbar=lambda: _status_toolbar(agent),
-    )
+    session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
 
     yolo_banner = "  ·  [red]YOLO[/red]" if agent.yolo else ""
     local_banner = "  ·  [magenta]LOCAL[/magenta]" if project.local_only else ""

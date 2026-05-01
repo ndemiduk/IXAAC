@@ -1,0 +1,59 @@
+---
+id: gdelt
+name: GDELT 2.0
+description: Global news/event database — query worldwide article coverage and trends over time
+categories: [news, trends, research]
+risk: low
+auth_type: none
+auth_env_vars: []
+---
+
+# GDELT 2.0
+
+Open database of global news and events, updated every 15 minutes, going back to 2015. No auth, no rate limits documented (but be reasonable). The DOC API matches articles by query; the GKG (Global Knowledge Graph) layer surfaces entities, themes, tones.
+
+## Usage
+
+### Search articles matching a query
+
+```bash
+curl -s 'https://api.gdeltproject.org/api/v2/doc/doc?query={QUERY}&mode=ArtList&maxrecords=25&format=json&timespan=24h'
+```
+
+`{QUERY}` supports phrases (`"climate accord"`), boolean (`AAPL OR NVDA`), and source filters (`sourcecountry:US`).
+
+### Coverage volume over time (the "trends" use case)
+
+```bash
+curl -s 'https://api.gdeltproject.org/api/v2/doc/doc?query={QUERY}&mode=TimelineVol&format=json&timespan=1month'
+```
+
+Returns time-bucketed counts — useful for "is this story growing or fading?"
+
+### Tone over time
+
+```bash
+curl -s 'https://api.gdeltproject.org/api/v2/doc/doc?query={QUERY}&mode=TimelineTone&format=json&timespan=1month'
+```
+
+Average article tone (–10 = very negative, +10 = very positive) bucketed over the timespan.
+
+### Image filter
+
+```bash
+curl -s 'https://api.gdeltproject.org/api/v2/doc/doc?query={QUERY}&mode=ImageCollage&format=html&timespan=24h'
+```
+
+## Response shape
+
+JSON with `articles[]` for ArtList mode, or `timeline[]` for the various Timeline modes. Each article entry: `url`, `title`, `seendate`, `sourcecountry`, `language`, `domain`.
+
+## Common timespans
+
+- `1h`, `4h`, `12h`, `24h`, `3d`, `1w`, `2w`, `1month`, `3months`, `6months`, `1year`
+- For arbitrary windows: `startdatetime=YYYYMMDDhhmmss&enddatetime=...`
+
+## Notes
+
+- GDELT is most useful for breadth-of-coverage questions. For "what is the latest", pair with `google-news` — GDELT lags by ~15min and doesn't cover every blog.
+- Results truncate at 250 articles per query; paginate with `startdatetime`/`enddatetime` for deeper sweeps.
