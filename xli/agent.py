@@ -633,7 +633,7 @@ class Agent:
         """One orchestrator chat-completions call, streamed.
 
         Streams content deltas progressively as plain text (console.print with end=""),
-        then renders a single final Markdown once at the end. Tool-call deltas are
+        Tool-call deltas are
         accumulated silently — the user sees discrete tool events (with
         previews) in the next phase. Returns (msg, usage, streamed_text)
         in the same shape the non-streaming code expects:
@@ -708,10 +708,11 @@ class Agent:
                         if getattr(fn, "arguments", None):
                             buf["arguments"] += fn.arguments
 
-        # Single final Markdown render for nicely formatted output.
-        if streamed_any and current_content:
+        # Ensure the cursor is on a fresh line after the final content delta.
+        # Without this the model stats ribbon ("grok-4.3 · N iter...") would
+        # appear glued to the last token of the streamed reply.
+        if content_started:
             self.console.print()
-            self.console.print(Markdown(current_content))
 
         # If a reasoning model produced thinking tokens but no actual content
         # and no tool_calls, the user would see nothing — surface the
