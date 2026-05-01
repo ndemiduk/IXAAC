@@ -2667,6 +2667,7 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             continue
 
         # Real conversation turn.
+        console.print(f"[bold cyan]You:[/bold cyan] {user_input}")
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
         except Exception as e:
@@ -3000,6 +3001,7 @@ def cmd_code(args: argparse.Namespace) -> int:
             else:
                 console.print("[green]plan approved — executing[/green]")
 
+        console.print(f"[bold cyan]You:[/bold cyan] {user_input}")
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
         except Exception as e:
