@@ -298,4 +298,3 @@ iXaac is built on:
 - **Tailscale** — private substrate so the XMPP daemon doesn't need to face the internet
 - **prompt_toolkit** + **rich** — the REPL frontend
 - **cryptography** + **keyring** — the credential vault
-- The decades of `mc` / Norton Commander / Total Commander UI lineage that this is, ultimately, trying to inherit
