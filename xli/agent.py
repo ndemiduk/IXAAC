@@ -236,6 +236,7 @@ class CallStats:
     iterations: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0    # subset of prompt_tokens billed at the cache discount
     cost_usd: Optional[float] = None  # None when no pricing configured
 
     @property
@@ -257,11 +258,34 @@ class CallStats:
             or getattr(usage, "output_tokens", None)
             or 0
         )
+        cached = _extract_cached_tokens(usage)
         self.prompt_tokens += prompt
         self.completion_tokens += completion
-        c = estimate_cost(pricing, model, prompt, completion)
+        self.cached_tokens += cached
+        c = estimate_cost(pricing, model, prompt, completion, cached_tokens=cached)
         if c is not None:
             self.cost_usd = (self.cost_usd or 0.0) + c
+
+    def absorb_server_tool(
+        self, prompt_tokens: int, completion_tokens: int, cost: float
+    ) -> None:
+        """Absorb server-tool sub-call usage. Cost is pre-computed by ToolContext
+        because the server-tool model may differ from this CallStats's model.
+        Server tools are separate API calls and aren't covered by the orchestrator
+        prompt cache, so cached_tokens stays untouched here."""
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        if cost:
+            self.cost_usd = (self.cost_usd or 0.0) + cost
+
+    def absorb(self, other: "CallStats") -> None:
+        """Merge another CallStats's totals into this one (for worker aggregation)."""
+        self.iterations += other.iterations
+        self.prompt_tokens += other.prompt_tokens
+        self.completion_tokens += other.completion_tokens
+        self.cached_tokens += other.cached_tokens
+        if other.cost_usd is not None:
+            self.cost_usd = (self.cost_usd or 0.0) + other.cost_usd
 
 
 def _extract_cached_tokens(usage) -> int:
@@ -277,24 +301,6 @@ def _extract_cached_tokens(usage) -> int:
     if details is None:
         return 0
     return getattr(details, "cached_tokens", 0) or 0
-
-    def absorb_server_tool(
-        self, prompt_tokens: int, completion_tokens: int, cost: float
-    ) -> None:
-        """Absorb server-tool sub-call usage. Cost is pre-computed by ToolContext
-        because the server-tool model may differ from this CallStats's model."""
-        self.prompt_tokens += prompt_tokens
-        self.completion_tokens += completion_tokens
-        if cost:
-            self.cost_usd = (self.cost_usd or 0.0) + cost
-
-    def absorb(self, other: "CallStats") -> None:
-        """Merge another CallStats's totals into this one (for worker aggregation)."""
-        self.iterations += other.iterations
-        self.prompt_tokens += other.prompt_tokens
-        self.completion_tokens += other.completion_tokens
-        if other.cost_usd is not None:
-            self.cost_usd = (self.cost_usd or 0.0) + other.cost_usd
 
 
 @dataclass

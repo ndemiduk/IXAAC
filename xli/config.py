@@ -67,8 +67,13 @@ CONFIG_TEMPLATE = {
     "max_parallel_workers": 8,
     "max_file_bytes": 1_000_000,
     "pricing": {
-        # "grok-4-1-fast-reasoning":     {"input_per_million": 0.0, "output_per_million": 0.0},
-        # "grok-4-1-fast-non-reasoning": {"input_per_million": 0.0, "output_per_million": 0.0},
+        # Per-model rates in USD per million tokens. cached_input_per_million
+        # is optional and defaults to input_per_million × 0.1 — a sensible
+        # approximation matching the OpenAI-compatible prompt-cache discount.
+        # Long agent turns frequently hit 80-95% cache, so leaving this off
+        # over-states real cost by ~4×. Verify against your xAI dashboard.
+        # "grok-4-1-fast-reasoning":     {"input_per_million": 0.0, "cached_input_per_million": 0.0, "output_per_million": 0.0},
+        # "grok-4-1-fast-non-reasoning": {"input_per_million": 0.0, "cached_input_per_million": 0.0, "output_per_million": 0.0},
     },
 }
 
