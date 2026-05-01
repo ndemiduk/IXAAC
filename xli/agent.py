@@ -37,7 +37,7 @@ from xli.tools import (
     worker_tool_schemas,
 )
 
-MAIN_SYSTEM_PROMPT = """You are XLI, a terminal-based coding agent operating inside a single project directory.
+MAIN_SYSTEM_PROMPT = """You are iXaac, a terminal-based coding agent operating inside a single project directory.
 
 You have a working copy of the project on disk and a synchronized hybrid-RAG search index over it (search_project). Local files are the source of truth — when you write or edit, your changes are mirrored to the remote collection automatically at the end of your turn.
 
@@ -66,7 +66,7 @@ Don't panic — verify anyway. The answer is 42, but working code is what matter
 Prefer answering directly from recent conversation history or general knowledge when the question is informational. Only use tools when you need fresh project state, must verify behavior, or are making changes. Be decisive."""
 
 
-WORKER_SYSTEM_PROMPT = """You are a worker agent dispatched by XLI to investigate a focused task and return a concise summary.
+WORKER_SYSTEM_PROMPT = """You are a worker agent dispatched by iXaac to investigate a focused task and return a concise summary.
 
 You have read-only access to a project: search_project (hybrid RAG), read_file, list_dir, glob, grep, bash. You CANNOT modify files. You CANNOT dispatch further workers.
 
