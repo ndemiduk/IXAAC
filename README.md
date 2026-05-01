@@ -243,7 +243,7 @@ For directories you don't want uploaded — NAS, photo libraries, PDFs, archives
 xli init --local --snapshot
 ```
 
-No Collection, no sync. `--snapshot` caches a paths-and-sizes index for fast structural search ("how many .flac files do I have, grouped by artist?"). Midnight Commander on steroids for content you keep entirely on disk.
+No Collection, no sync. `--snapshot` caches a paths-and-sizes index for fast structural search ("how many .flac files do I have, grouped by artist?"). 
 
 ### Multi-key swarm
 
