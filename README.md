@@ -62,7 +62,7 @@ You'll need:
 - About 5 minutes
 
 ```bash
-git clone <your-repo-url> ixaac
+git clone https://github.com/iXaac-xli/iXaac ixaac
 cd ixaac
 python3 -m venv venv
 ./venv/bin/pip install -e .
@@ -358,6 +358,158 @@ Headers, bold, code blocks, lists render progressively as text accumulates.
 Tool calls stream silently and materialize as discrete `→ tool_name` lines
 with green/red badges and dimmed result previews under each one — you see
 both the answer flowing and the work happening.
+
+---
+
+## Command reference
+
+Two surfaces: the **CLI** (`xli <command>`, run from your shell) and the
+**REPL slash commands** (typed inside `xli code` or `xli chat`). Most
+day-to-day work lives in the REPL; the CLI is for setup, lifecycle, and
+out-of-session management.
+
+### CLI — project lifecycle
+
+| Command | What it does |
+|---|---|
+| `xli init [NAME] [--path PATH] [--collection-id ID] [--no-sync] [--force] [--local] [--snapshot]` | Initialize a project. `--local` skips the Collection (no upload, no sync); `--snapshot` caches a paths+sizes index for fast structural search; `--collection-id` reuses an existing Collection. |
+| `xli new <NAME> [--path PATH]` | Create a directory and initialize it in one step. |
+| `xli scratch [NAME] [--no-chat] [--yolo] [--force]` | Spin up an ephemeral local-only project under `~/.xli/scratch/` and drop into chat. |
+| `xli sync [PATH] [--dry-run]` | Push local changes to the project's Collection. Auto-runs after every mutating turn; manual is rarely needed. |
+| `xli code [TARGET] [--yolo]` | Project-scoped code REPL. `TARGET` can be a path or a registered project name (works from anywhere). |
+| `xli chat [NAME] [--new N \| --list \| --edit N \| --delete N] [--yolo]` | Persona-based conversation REPL. `--new` creates a persona, `--edit` re-opens its prompt in `$EDITOR`, `--delete` wipes prompt + state dir. |
+| `xli status [PATH]` | Show config, key pool, models, temperatures, project state, cost-tracking state. |
+| `xli projects [FILTER]` | List every registered xli-initialized project; filter by substring. |
+| `xli ask --workspace W "PROMPT"` | One-shot agent run for non-interactive callers. Used by the XMPP daemon for agent fallback. Prints reply to stdout. |
+
+### CLI — workspaces
+
+Broader than `xli projects`: also tracks directories you reference but never
+`xli init`'d (e.g. archived snapshots, reference repos). Auto-touched by
+every `xli` invocation. Used by the XMPP daemon for agent-fallback routing.
+
+| Command | What it does |
+|---|---|
+| `xli workspaces list [--projects \| --snapshots]` | List workspaces, sorted by last-active. |
+| `xli workspaces add PATH [--snapshot] [--alias NAME] [--notes ...]` | Register a directory. Without `--snapshot` it's `kind=project`. |
+| `xli workspaces project KEY` / `xli workspaces snapshot KEY` | Flip a workspace's kind. KEY can be alias or path. |
+| `xli workspaces alias KEY [NEW_ALIAS]` | Set or clear an alias. Aliases are unique; setting a colliding alias clears the previous holder. |
+| `xli workspaces remove KEY` | Forget a workspace. |
+
+### CLI — knowledge curation
+
+| Command | What it does |
+|---|---|
+| `xli plugin --new ID` | Create a new plugin from a starter template; opens `$EDITOR`. |
+| `xli plugin --list` | List every installed plugin (the global catalog). |
+| `xli plugin --show ID` | Print a plugin's full markdown to stdout. |
+| `xli plugin --edit ID` | Edit a plugin in `$EDITOR`. |
+| `xli plugin --delete ID [--yes]` | Delete a plugin. |
+| `xli plugin --install-stock [--force]` | Install the bundled 11-plugin starter pack. Skips plugins you already have unless `--force`. |
+| `xli auth set ID KEY=value [...]` | Store one or more secrets for a plugin in the encrypted vault. Auto-creates the vault on first call. |
+| `xli auth list [ID]` | List plugins with stored secrets, or the keys for a single plugin. |
+| `xli auth show ID [--reveal]` | Show stored keys (values redacted by default; `--reveal` prints plaintext). |
+| `xli auth clear ID [KEY]` | Remove a single key, or every key for a plugin. |
+| `xli doc --new NAME` | Create a new reference doc; opens `$EDITOR`. |
+| `xli doc --list` | List all reference docs. |
+| `xli doc --edit NAME` | Edit a doc in `$EDITOR`. |
+| `xli doc --delete NAME [--yes]` | Delete a doc. |
+
+### CLI — setup, keys, models
+
+| Command | What it does |
+|---|---|
+| `xli config` | Write a config template to `~/.config/xli/config.json` if missing (chmod 600). |
+| `xli setup [--workers N] [--expire-days N] [--force]` | One-shot first-time setup: config + team_id discovery + key provisioning + model auto-detect. Idempotent. |
+| `xli bootstrap [--count N] [--prefix LABEL] [--expire-days N] [--force] [--revoke] [--yes]` | Lower-level: provision N chat keys with a label prefix, or `--revoke` to delete keys by prefix. |
+| `xli keys list` | Show every chat key with days-until-expiration and status. |
+| `xli keys rotate [--label LABEL]` | Rotate the secret on one (or all) keys. Key ID stays the same. |
+| `xli keys expire --days N [--label LABEL]` | Update the `expireTime` on one (or all) keys. |
+| `xli keys revoke [--prefix LABEL] [--yes]` | Delete keys by label prefix (server-side + local config). |
+| `xli models list` | List models the team has access to. |
+| `xli models recommended` | Print the heuristic best-of-class picks (no commit). |
+| `xli models set [--orchestrator NAME] [--worker NAME]` | Pin orchestrator and/or worker model. |
+
+### CLI — multi-machine fabric
+
+| Command | What it does |
+|---|---|
+| `xli daemon --xmpp [--config PATH]` | Run the inbound XMPP daemon. Reads `~/.config/xli/daemon.toml` by default; password from `$XMPP_DAEMON_PASSWORD`. Re-execs through the OMEMO venv. |
+
+The outbound side isn't a CLI subcommand — it's the `xmpp_send` plugin the
+agent calls when you ask it to send a message. The script lives at
+`~/.config/xli/bin/xmpp_send.py` if you want to invoke it manually.
+
+### CLI — housekeeping
+
+| Command | What it does |
+|---|---|
+| `xli gc [--dry-run] [--yes]` | Find orphan xAI Collections (registry says project exists, disk says no) and offer to delete them. |
+| `xli help` | Grouped command reference. |
+
+### REPL — universal slash commands
+
+These work the same in both `xli code` and `xli chat`:
+
+| Slash | Effect |
+|---|---|
+| `/help` | Show all slash commands available in this REPL. |
+| `/exit`, `/quit` | Leave the REPL. |
+| `!<shell>` | Run a shell command **locally** (no agent turn, no tokens). Output streams to your terminal. Use for `clear`, `ls`, ad-hoc utilities. |
+| `/sync` | Force a full sync now. |
+| `/reset` | Clear conversation history (keeps system prompt + attached docs). |
+| `/cost` | Print pricing table + which active models are covered. |
+| `/yolo` / `/safe` | Toggle the bash confirmation gate. YOLO skips per-intent prompts. |
+| `/models` | Show current orchestrator + worker models and temperatures. |
+| `/temp <0.0..2.0>` | Override orchestrator temperature for the next turn only. |
+| `/status` | Show project state (collection, pool, mode flags, attached refs/docs). |
+| `/projects` | List registered projects (current marked ●). |
+
+### REPL — investigation flow (code mode)
+
+| Slash | Effect |
+|---|---|
+| `/plan` | Enter plan mode. Read-only investigation tools + scoped scratchpad at `.xli/plan-notes.md`. Resumable across `/exit` and across max-iteration aborts. |
+| `/execute` | Approve and execute the plan. Archives the scratchpad to `.xli/plans/approved-<ts>.md`. |
+| `/cancel` | Drop plan mode. Archives the scratchpad to `.xli/plans/cancelled-<ts>.md` for recovery. |
+
+### REPL — knowledge layer
+
+| Slash | Effect |
+|---|---|
+| `/ref [persona]` | Attach a persona's memory to `search_project` (no arg = list). Persists in `.xli/refs.txt`. |
+| `/unref <persona>` | Detach a previously-attached persona. |
+| `/doc [name]` | Attach a reference doc into the system prompt (no arg = list). Persists in `.xli/docs.txt`. |
+| `/undoc <name>` | Detach a previously-attached doc. |
+| `/lib` | List subscribed plugins for this project. |
+| `/lib all` | Show the global catalog (● = subscribed here). |
+| `/lib subscribe <id>` | Subscribe to a plugin for this project. |
+| `/lib unsubscribe <id>` | Unsubscribe. |
+| `/lib remove <id>` | Delete a plugin from the catalog entirely. |
+| `/get <intent>` | Find and invoke a subscribed plugin matching the natural-language intent. |
+
+### REPL — persona-only (chat mode)
+
+| Slash | Effect |
+|---|---|
+| `/persona <name>` | Switch to another persona mid-session. Saves current state, loads new one's prompt + last-N turns. |
+| `/personas` | List personas (current/last-used marked ●). |
+| `/edit` | Open the current persona's prompt in `$EDITOR` (takes effect next session). |
+| `/forget` | Wipe the current persona's transcript (with y/N confirm). |
+
+### Prompt-prefix indicators
+
+Both REPLs show ambient state in the prompt prefix:
+
+| Prefix | Meaning |
+|---|---|
+| `›` | Nothing attached, normal mode. |
+| `+1d ›` | One doc attached. |
+| `+1r ›` | One ref attached. |
+| `+1r/2d ›` | One ref + two docs. |
+| `+2d! ›` | Trailing `!` means at least one attached doc exceeds the 20kB soft cap. |
+| `[plan] +1r ›` | Mode tag combines with attachment counts. |
+| `[yolo] ›` | Yolo mode active (bash gate skipped). |
 
 ---
 
