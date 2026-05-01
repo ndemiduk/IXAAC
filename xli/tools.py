@@ -819,17 +819,53 @@ def t_summarize_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _summarize_python_file(rel: str, text: str, total_lines: int, focus: str = "all") -> str:
-    """Python-specific summary using AST. Supports focus modes for lower token use."""
+    """Python-specific summary using AST.
+
+    Returns a navigation index — every class, method, and top-level function
+    annotated with its starting line number and length. The model can use
+    this output to call read_file with a precise (offset, limit), eliminating
+    the "peek → decide → peek" cycle on large modules. Adding line numbers
+    is what turns summarize_file from a partial sketch into a usable map.
+    """
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return _summarize_generic(rel, text.splitlines(), total_lines)
 
-    imports = []
-    classes = []
-    functions = []
+    def _signature(fn) -> str:
+        """Render a callable's argument list compactly. Skips type annotations
+        to keep tokens low — the goal is locating, not type-checking."""
+        parts: list[str] = []
+        for arg in fn.args.args:
+            parts.append(arg.arg)
+        if fn.args.vararg:
+            parts.append("*" + fn.args.vararg.arg)
+        if fn.args.kwonlyargs:
+            if not fn.args.vararg:
+                parts.append("*")
+            parts.extend(a.arg for a in fn.args.kwonlyargs)
+        if fn.args.kwarg:
+            parts.append("**" + fn.args.kwarg.arg)
+        return f"{fn.name}({', '.join(parts)})"
 
-    for node in tree.body:  # only top-level nodes
+    def _doc_first_line(node) -> str:
+        doc = ast.get_docstring(node) or ""
+        return doc.split("\n", 1)[0].strip()[:80]
+
+    def _span(node) -> tuple[int, int]:
+        """(start_line, length_in_lines). Uses ast.end_lineno (Python 3.8+)."""
+        start = node.lineno
+        end = getattr(node, "end_lineno", None) or start
+        return start, max(end - start + 1, 1)
+
+    imports: list[str] = []
+    classes: list[dict] = []
+    functions: list[dict] = []
+    constants: list[dict] = []  # uppercase top-level names; module-level state
+
+    func_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
@@ -838,39 +874,93 @@ def _summarize_python_file(rel: str, text: str, total_lines: int, focus: str = "
             names = ", ".join(a.name for a in node.names)
             imports.append(f"from {mod} import {names}")
         elif isinstance(node, ast.ClassDef):
-            bases = [b.id if isinstance(b, ast.Name) else "..." for b in node.bases]
-            base_str = f"({', '.join(bases)})" if bases else ""
-            doc = ast.get_docstring(node) or ""
-            first_doc = doc.split("\n")[0][:80] if doc else ""
-            classes.append(f"class {node.name}{base_str}: {first_doc}")
-        elif isinstance(node, ast.FunctionDef):
-            args = [arg.arg for arg in node.args.args]
-            if node.args.vararg:
-                args.append("*" + node.args.vararg.arg)
-            if node.args.kwarg:
-                args.append("**" + node.args.kwarg.arg)
-            doc = ast.get_docstring(node) or ""
-            first_doc = doc.split("\n")[0][:60] if doc else ""
-            functions.append(f"def {node.name}({', '.join(args)}): {first_doc}")
+            line, length = _span(node)
+            bases: list[str] = []
+            for b in node.bases:
+                if isinstance(b, ast.Name):
+                    bases.append(b.id)
+                elif isinstance(b, ast.Attribute):
+                    bases.append(b.attr)
+                else:
+                    bases.append("...")
+            methods: list[dict] = []
+            for child in node.body:
+                if isinstance(child, func_types):
+                    m_line, m_len = _span(child)
+                    methods.append({
+                        "sig": _signature(child),
+                        "line": m_line,
+                        "len": m_len,
+                        "doc": _doc_first_line(child),
+                    })
+            classes.append({
+                "name": node.name,
+                "bases": bases,
+                "line": line,
+                "len": length,
+                "doc": _doc_first_line(node),
+                "methods": methods,
+            })
+        elif isinstance(node, func_types):
+            line, length = _span(node)
+            functions.append({
+                "sig": _signature(node),
+                "line": line,
+                "len": length,
+                "doc": _doc_first_line(node),
+            })
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id.replace("_", "").isupper()
+                    and len(target.id) > 1
+                ):
+                    constants.append({"name": target.id, "line": node.lineno})
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            tid = node.target.id
+            if tid.replace("_", "").isupper() and len(tid) > 1:
+                constants.append({"name": tid, "line": node.lineno})
 
-    out = [f"File: {rel} ({total_lines} lines)\n"]
+    out: list[str] = [f"File: {rel} ({total_lines} lines)"]
 
     if focus in ("all", "imports") and imports:
-        out.append("Imports:\n" + "\n".join(f"  - {imp}" for imp in imports[:15]))
-    if focus in ("all", "classes", "signatures") and classes:
-        out.append("\nClasses:\n" + "\n".join(f"  - {c}" for c in classes[:12]))
-    if focus in ("all", "functions", "signatures") and functions:
-        out.append("\nTop-level functions:\n" + "\n".join(f"  - {f}" for f in functions[:15]))
+        out.append("")
+        out.append(f"Imports ({len(imports)}):")
+        for imp in imports[:20]:
+            out.append(f"  {imp}")
+        if len(imports) > 20:
+            out.append(f"  ... ({len(imports) - 20} more)")
 
-    # Fallback if focus filtered everything out
+    if focus == "all" and constants:
+        out.append("")
+        out.append(f"Module-level constants ({len(constants)}):")
+        for k in constants[:15]:
+            out.append(f"  {k['name']} @ L{k['line']}")
+        if len(constants) > 15:
+            out.append(f"  ... ({len(constants) - 15} more)")
+
+    if focus in ("all", "classes", "signatures") and classes:
+        out.append("")
+        out.append(f"Classes ({len(classes)}):")
+        for c in classes:
+            base_str = f"({', '.join(c['bases'])})" if c["bases"] else ""
+            doc = f" — {c['doc']}" if c["doc"] else ""
+            out.append(f"  {c['name']}{base_str} @ L{c['line']} ({c['len']} lines){doc}")
+            for m in c["methods"]:
+                m_doc = f" — {m['doc']}" if m["doc"] else ""
+                out.append(f"    .{m['sig']} @ L{m['line']} ({m['len']} lines){m_doc}")
+
+    if focus in ("all", "functions", "signatures") and functions:
+        out.append("")
+        out.append(f"Top-level functions ({len(functions)}):")
+        for fn in functions:
+            f_doc = f" — {fn['doc']}" if fn["doc"] else ""
+            out.append(f"  {fn['sig']} @ L{fn['line']} ({fn['len']} lines){f_doc}")
+
+    # Defensive: if a focus filter blanked everything, fall back to full layout.
     if len(out) == 1:
-        if focus == "imports" and not imports:
-            return _summarize_generic(rel, text.splitlines(), total_lines)
-        # default to showing what we have
-        if classes:
-            out.append("\nClasses:\n" + "\n".join(f"  - {c}" for c in classes[:12]))
-        if functions:
-            out.append("\nTop-level functions:\n" + "\n".join(f"  - {f}" for f in functions[:15]))
+        return _summarize_python_file(rel, text, total_lines, focus="all")
 
     return "\n".join(out)
 
@@ -979,7 +1069,14 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "summarize_file",
-                "description": "Compact structural summary of a file (focus on signatures/imports/classes/functions). Cheaper than read_file.",
+                "description": (
+                    "Structural map of a Python file: every class, method, and "
+                    "top-level function annotated with starting line number and "
+                    "length in lines. Cheaper than read_file. Use this output as "
+                    "a navigation index — once you know the line/length of the "
+                    "block you care about, follow up with read_file(offset, limit) "
+                    "to get exactly that range, no exploration needed."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
