@@ -78,6 +78,7 @@ class GlobalConfig:
     model: str = DEFAULT_MODEL                           # legacy fallback
     orchestrator_model: Optional[str] = None             # main agent model
     worker_model: Optional[str] = None                   # subagent model
+    router_model: Optional[str] = None                   # cheap/fast classifier for initial chatter
     orchestrator_temperature: float = DEFAULT_ORCH_TEMP
     worker_temperature: float = DEFAULT_WORKER_TEMP
     retrieval_mode: str = DEFAULT_RETRIEVAL_MODE
@@ -95,6 +96,10 @@ class GlobalConfig:
     def worker(self) -> str:
         """Model used by dispatched workers. Falls back to orchestrator/model."""
         return self.worker_model or self.orchestrator_model or self.model
+
+    def router(self) -> str:
+        """Cheap/fast model used for initial chatter classification before full orchestrator."""
+        return self.router_model or self.worker_model or self.orchestrator_model or self.model
 
     def orchestrator_temp(self) -> float:
         """Orchestrator sampling temperature. Use `is not None` so a deliberate
@@ -120,6 +125,8 @@ class GlobalConfig:
             return self.worker()
         if role == "orchestrator":
             return self.orchestrator()
+        if role == "router":
+            return self.router()
         raise ValueError(f"unknown model role: {role!r}")
 
     @classmethod

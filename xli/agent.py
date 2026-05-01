@@ -621,12 +621,51 @@ class Agent:
 
         return False
 
+    def _classify_intent(self, message: str) -> str:
+        """Use the cheap router model to decide if this is trivial chatter.
+        Returns 'trivial' or 'substantive'. This runs before the heavy orchestrator
+        and full tool schemas are loaded.
+        """
+        if self.plan_mode or len(message) > 180:
+            return "substantive"
+
+        router_model = self.cfg.get_model_for_role("router")
+        # Very small prompt — no tools, minimal system instructions
+        classify_prompt = [
+            {
+                "role": "system",
+                "content": "You are a fast classifier. Reply with exactly one word only: TRIVIAL if the user message is casual greeting, small talk, 'I'm back', status question, or clearly does not require code changes, file edits, running commands, or deep investigation. Otherwise reply SUBSTANTIVE."
+            },
+            {"role": "user", "content": message}
+        ]
+
+        try:
+            resp = self.clients.chat.chat.completions.create(
+                model=router_model,
+                messages=classify_prompt,
+                max_tokens=4,
+                temperature=0.0,
+            )
+            text = (resp.choices[0].message.content or "").strip().upper()
+            if "TRIVIAL" in text:
+                return "trivial"
+            return "substantive"
+        except Exception:
+            # On any failure, be conservative and use full path
+            return "substantive"
+
     def run_turn(self, user_message: str) -> tuple[str, set[str], TurnStats]:
         # Refresh the system prompt so /doc and /undoc take effect immediately.
         # Cheap when no docs are attached (string identity check); rebuilds
         # only when the attached set changed.
         if self.history and self.history[0].get("role") == "system":
             self.history[0] = {"role": "system", "content": self._effective_system_prompt()}
+
+        # Cheap pre-classification using router model to avoid waking the heavy
+        # orchestrator for trivial chatter.
+        intent = "substantive"
+        if not self.plan_mode:
+            intent = self._classify_intent(user_message)
 
         if self.plan_mode:
             notes = _read_plan_notes(self.project)
@@ -637,7 +676,10 @@ class Agent:
             )
             schemas = plan_mode_schemas()
         else:
-            if self._is_likely_direct_question(user_message):
+            if intent == "trivial":
+                # Ultra-light path: no tools at all. Router model will answer directly.
+                schemas = []
+            elif self._is_likely_direct_question(user_message):
                 # Fast path: reduced read-only schemas only.
                 # Avoids edit_file, write_file, bash, dispatch_subagent, web_search, etc.
                 from xli.tools import worker_tool_schemas
@@ -669,7 +711,10 @@ class Agent:
             subscribed_plugins=subs,
         )
         stats = TurnStats()
-        stats.orch.model = self.cfg.get_model_for_role("orchestrator")
+        if intent == "trivial":
+            stats.orch.model = self.cfg.get_model_for_role("router")
+        else:
+            stats.orch.model = self.cfg.get_model_for_role("orchestrator")
         stats.workers.model = self.cfg.get_model_for_role("worker")
         model = stats.orch.model
         cache_hdrs = _cache_headers(self.project.conversation_id)
@@ -679,6 +724,8 @@ class Agent:
         if self.next_turn_temp_override is not None:
             temperature = self.next_turn_temp_override
             self.next_turn_temp_override = None
+        elif intent == "trivial":
+            temperature = 0.0
         else:
             temperature = self.cfg.orchestrator_temp()
 
@@ -765,12 +812,13 @@ class Agent:
         kwargs: dict[str, Any] = dict(
             model=model,
             messages=self.history,
-            tools=schemas,
-            tool_choice="auto",
             temperature=temperature,
             stream=True,
             stream_options={"include_usage": True},
         )
+        if schemas:
+            kwargs["tools"] = schemas
+            kwargs["tool_choice"] = "auto"
         if cache_hdrs:
             kwargs["extra_headers"] = cache_hdrs
 
