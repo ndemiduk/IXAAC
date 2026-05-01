@@ -47,6 +47,7 @@ Conventions:
 - Project paths are POSIX-style and relative to the project root.
 - Prefer search_project and summarize_file over read_file on large files. read_file is expensive — use it only when you need surrounding context the RAG didn't give you.
 - Use edit_file for surgical changes; write_file only for new files or full rewrites.
+- If edit_file returns "old_string not found", call read_file on a wide window of the function (or the full file if small) before any retry. Never retry with a guessed or approximate string from a previous small window — that loop is observed to burn 10+ iterations on a single edit.
 - Be terse. Don't narrate; just do the work and report what changed.
 
 Verification (mandatory before declaring success):
@@ -688,8 +689,15 @@ class Agent:
         """Use the cheap router model to decide if this is trivial chatter.
         Returns 'trivial' or 'substantive'. This runs before the heavy orchestrator
         and full tool schemas are loaded.
+
+        The 400-char length cap is a cheap pre-filter: messages longer than
+        this are almost always real task descriptions, so we skip the router
+        LLM call entirely. Tuned up from 180 after observing that
+        conversational re-entries ("hi, I'm back, here's context, here's
+        what I want…") routinely exceed 200 chars and were pointlessly
+        hitting the substantive path with full tool schemas.
         """
-        if self.plan_mode or len(message) > 180:
+        if self.plan_mode or len(message) > 400:
             return "substantive"
 
         router_model = self.cfg.get_model_for_role("router")
@@ -804,11 +812,18 @@ class Agent:
                 pre_chars = _history_chars(self.history)
                 t_start = time.perf_counter()
 
+            # Hard safety net: on the last 2 iterations of the budget, force
+            # the model to produce a textual answer instead of more tool calls.
+            # tool_choice="none" is an API-level constraint — sampling cannot
+            # emit a tool call when it's set. This is what makes the iteration
+            # cap a real cap, not just a "the loop returns 'stopped'" message.
+            force_final = iter_idx >= self.cfg.max_tool_iterations - 1
             msg, usage, streamed = self._stream_orchestrator_iteration(
                 model=model,
                 schemas=schemas,
                 temperature=temperature,
                 cache_hdrs=cache_hdrs,
+                force_final_answer=force_final,
             )
             if usage is not None:
                 stats.orch.absorb_usage(usage, model, self.cfg.pricing)
@@ -897,6 +912,7 @@ class Agent:
         schemas: list,
         temperature: float,
         cache_hdrs: Optional[dict],
+        force_final_answer: bool = False,
     ) -> tuple[Any, Any, bool]:
         """One orchestrator chat-completions call, streamed.
 
@@ -909,6 +925,13 @@ class Agent:
 
         `streamed_text` is True iff any content was printed live; the caller
         uses this to suppress double-printing in the REPL.
+
+        When `force_final_answer=True`, sets `tool_choice="none"` so the model
+        is forbidden from emitting a tool call this iteration. Used by the
+        run_turn loop on its last 1-2 iterations as a hard safety net against
+        spirals — ends a runaway turn cleanly with whatever textual answer
+        the model can produce, rather than just hitting max_tool_iterations
+        mid-tool-call and leaving the repo in a half-finished state.
         """
         kwargs: dict[str, Any] = dict(
             model=model,
@@ -919,7 +942,7 @@ class Agent:
         )
         if schemas:
             kwargs["tools"] = schemas
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = "none" if force_final_answer else "auto"
         if cache_hdrs:
             kwargs["extra_headers"] = cache_hdrs
 

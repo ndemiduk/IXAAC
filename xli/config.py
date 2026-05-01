@@ -49,7 +49,7 @@ CONFIG_TEMPLATE = {
     "retrieval_mode": DEFAULT_RETRIEVAL_MODE,
     "team_id": "",
     "keys": [],
-    "max_tool_iterations": 60,
+    "max_tool_iterations": 25,
     "max_worker_iterations": 10,
     "max_parallel_workers": 8,
     "max_file_bytes": 1_000_000,
@@ -83,7 +83,7 @@ class GlobalConfig:
     worker_temperature: float = DEFAULT_WORKER_TEMP
     retrieval_mode: str = DEFAULT_RETRIEVAL_MODE
     max_file_bytes: int = 1_000_000
-    max_tool_iterations: int = 60  # 60 supports deeper xAI Collections RAG sessions. Don't panic.
+    max_tool_iterations: int = 25  # Lower default + tool_choice="none" safety net + edit-failure rule bounds spirals. Progressive nudges at ~6/12/20.
     max_worker_iterations: int = 10
     max_parallel_workers: int = 8
     pricing: dict = field(default_factory=dict)          # model -> {input_per_million, output_per_million}
