@@ -1,6 +1,6 @@
 """Reference document management for `/doc` slash command.
 
-A doc is a named piece of static knowledge — a CLAUDE.md-style guide, a
+A doc is a named piece of static knowledge — a GROK.md-style guide or project convention, a
 framework's coding conventions, a project spec — that any session can
 attach via `/doc <name>`. Attached docs are inlined into the agent's
 system prompt for the rest of the session, so they're ALWAYS in context

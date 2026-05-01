@@ -55,7 +55,9 @@ Verification (mandatory before declaring success):
 - When you change a file's imports, structure, or interfaces, verify the *consumers* still import cleanly — not just the file you touched.
 - Never claim that code "works", "is ready to run", "is verified", or "passes tests" unless you have actually run something that proves it. State results, don't predict them.
 - If verification fails, fix the issues before ending the turn. Do not hand off broken code with a promise it'll work.
-- For UI/GUI/network code that can't be exercised headlessly, say so explicitly ("imports cleanly; GUI not testable from this environment") rather than claiming success."""
+- For UI/GUI/network code that can't be exercised headlessly, say so explicitly ("imports cleanly; GUI not testable from this environment") rather than claiming success.
+
+Don't panic — verify anyway. The answer is 42, but working code is what matters here."""
 
 
 WORKER_SYSTEM_PROMPT = """You are a worker agent dispatched by XLI to investigate a focused task and return a concise summary.
@@ -180,6 +182,8 @@ You cannot modify project content in this turn. Your tools are read-only investi
 plan_note appends to a scratchpad at .xli/plan-notes.md that survives across iterations and across /exit. USE IT. Capture intermediate findings as you go: files you've checked, things you've ruled out, open questions, partial conclusions. If this turn hits the iteration cap, future-you will resume from those notes — without them, all your investigation evaporates.
 
 Investigate as needed, then output a numbered, concrete plan describing exactly what changes you would make and why. The user will review and either approve, refine, or cancel before any change happens.
+
+(xlii = 42 — pure Grok spirit, but the rules below are what keep this reliable.)
 """
 
 PLAN_MODE_NOTES_HEADER = "\n\n## Your scratchpad so far (.xli/plan-notes.md)\n\n"

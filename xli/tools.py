@@ -21,18 +21,8 @@ from xli.config import GlobalConfig, ProjectConfig
 MAX_OUTPUT_BYTES = 30_000
 
 
-# Defense-in-depth: shell commands declared as `intent=read-only` get scanned
-# for obvious mutation patterns. The intent declaration is honor-system —
-# without this check, a worker (or any agent) could declare read-only and
-# still run `rm -rf`, `git push`, or a package install. This list raises the
-# bar from honor-system to "well-known mutation patterns refused at the tool
-# layer." It cannot catch all obfuscation (eval $(...), base64-encoded
-# payloads, etc.) — only real sandboxing solves that. The point is to
-# eliminate the casual / accidental case.
-#
-# Each entry is (regex, human-readable reason). Patterns anchor at "command
-# position" — start of input, or after a separator (; & | \n ( etc.) — so
-# embedded substrings like `grep 'rm -rf' .` don't false-positive.
+# Worker read-only guard. Catches the classics (rm, pip install, git push, eval).
+# Base64 obfuscation still wins — that's why we have sandboxes. Don't panic.
 _WORKER_CMD_BOUNDARY = r"(?:^|[;&|\n(`])"
 
 WORKER_FORBIDDEN_PATTERNS: list[tuple[str, str]] = [
@@ -333,10 +323,8 @@ def t_bash(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             is_error=True,
         )
 
-    # Defense-in-depth on top of the honor-system intent gate: when the agent
-    # declares read-only, scan for obvious mutation patterns. Catches the
-    # casual case where a worker (or orchestrator) misclassifies a write as
-    # read-only. Doesn't catch obfuscation — that needs real sandboxing.
+    # Defense-in-depth on the intent gate. Catches casual misclassifications.
+    # Obfuscation needs real sandboxes. Don't panic.
     if intent == INTENT_READ_ONLY:
         ok, reason = _check_read_only_command(cmd)
         if not ok:

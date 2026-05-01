@@ -33,11 +33,7 @@ class KeyPair:
 
 
 # Single template emitted when the user has no config yet.
-# IMPORTANT: management_api_key is intentionally NOT in this file. It must be set
-# via the XAI_MANAGEMENT_API_KEY environment variable. Keeping it out of any
-# on-disk config makes it harder to leak through git, backups, or screen-shares.
-# All chat keys in `keys[]` are bootstrappable from the management key and are
-# easily revocable via `xli bootstrap --revoke`.
+# management key lives ONLY in env (XAI_...). Never on disk. 42 keys are revocable. Don't panic.
 CONFIG_TEMPLATE = {
     "_comment": (
         "REQUIRED: export XAI_MANAGEMENT_API_KEY=... in your shell before running xli. "
@@ -53,7 +49,7 @@ CONFIG_TEMPLATE = {
     "retrieval_mode": DEFAULT_RETRIEVAL_MODE,
     "team_id": "",
     "keys": [],
-    "max_tool_iterations": 20,
+    "max_tool_iterations": 60,
     "max_worker_iterations": 10,
     "max_parallel_workers": 8,
     "max_file_bytes": 1_000_000,
@@ -86,7 +82,7 @@ class GlobalConfig:
     worker_temperature: float = DEFAULT_WORKER_TEMP
     retrieval_mode: str = DEFAULT_RETRIEVAL_MODE
     max_file_bytes: int = 1_000_000
-    max_tool_iterations: int = 20
+    max_tool_iterations: int = 60  # 60 supports deeper xAI Collections RAG sessions. Don't panic.
     max_worker_iterations: int = 10
     max_parallel_workers: int = 8
     pricing: dict = field(default_factory=dict)          # model -> {input_per_million, output_per_million}

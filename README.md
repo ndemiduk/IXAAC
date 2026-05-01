@@ -178,7 +178,7 @@ today's code work.
 
 Reference docs (markdown files at `~/.config/xli/docs/<name>.md`) get inlined
 into the agent's system prompt. Project rules, framework conventions,
-CLAUDE.md-style guidance, any always-on context. Soft cap of 20kB before a
+GROK.md-style or reference guidance, any always-on context. Soft cap of 20kB before a
 warning — bigger reference material should become a persona instead.
 
 ### `/get <intent>` — invoke a plugin
