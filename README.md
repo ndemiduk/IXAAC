@@ -272,7 +272,7 @@ Headers, bold, code blocks, lists render progressively as text accumulates. Tool
 
 ## Who it's for
 
-People who already build their own bash aliases, dotfiles, NixOS configs, self-hosted services. People who type `:set` reflexively. People who've used Midnight Commander or Norton Commander or Total Commander for decades. People who want to invest in a tool and have the tool reward that investment.
+People who already build their own bash aliases, dotfiles, NixOS configs, self-hosted services. People who type `:set` reflexively. People who want to invest in a tool and have the tool reward that investment.
 
 If you bounce off the setup, you're probably in the wrong audience — and that's a feature, not a bug.
 
@@ -283,7 +283,6 @@ If you bounce off the setup, you're probably in the wrong audience — and that'
 - **Some xAI Collections operations are flaky** — `INTERNAL` errors happen occasionally on document updates; sync retries on rate-limit but not on `INTERNAL` yet.
 - **OMEMO trust** is BTBV (blind-trust-before-verification) — pragmatic for a Tailscale-only personal substrate, not appropriate for a publicly reachable daemon.
 - **Reasoning models can rationalize past system-prompt rules.** For persona/style work, prefer non-reasoning models like `grok-4-1-fast-non-reasoning`. Set with `xli models set --orchestrator <name>`.
-- **The bigger end goal** is a Midnight Commander–shaped frontend (panel-based, function-keys, AI augmentation on top of the verbs you already know). That's months of work in a faster language than Python — Python core stays, frontend will be Rust + Ratatui or similar. Until then, you have the REPL.
 
 ## License
 
