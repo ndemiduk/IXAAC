@@ -177,9 +177,15 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
 
 
 PLAN_MODE_PREAMBLE = """[PLAN MODE ACTIVE]
-You cannot modify project content in this turn. Your tools are read-only investigation (read_file, list_dir, glob, grep, search_project, web_search, x_search, plugin_search, plugin_get) plus one scoped write tool: plan_note. No write_file, no edit_file, no bash, no dispatch_subagent.
+You cannot modify project content in this turn. Your tools are read-only investigation (read_file, list_dir, glob, grep, search_project, web_search, x_search, plugin_search, plugin_get, summarize_file) plus one scoped write tool: plan_note (supports optional `return_notes_after`). No write_file, no edit_file, no bash, no dispatch_subagent.
 
-plan_note appends to a scratchpad at .xli/plan-notes.md that survives across iterations and across /exit. USE IT. Capture intermediate findings as you go: files you've checked, things you've ruled out, open questions, partial conclusions. If this turn hits the iteration cap, future-you will resume from those notes — without them, all your investigation evaporates.
+EFFICIENCY RULES (important for long investigations):
+- Prefer `search_project` and `summarize_file` over raw `read_file` on large modules. Only fall back to full reads when you need surrounding context the summary/RAG didn't provide.
+- Use `plan_note` + `read_plan_notes` heavily to keep state outside the growing transcript.
+- The result cache will tell you when you're repeating a call — use that information instead of re-reading.
+- Keep individual tool outputs focused. Long investigations accumulate tokens fast if you re-read the same files.
+
+plan_note appends to a scratchpad at .xli/plan-notes.md that survives across iterations and across /exit. USE IT. You can also call read_plan_notes anytime to re-read your current scratchpad. Capture intermediate findings as you go: files you've checked, things you've ruled out, open questions, partial conclusions. If this turn hits the iteration cap, future-you will resume from those notes — without them, all your investigation evaporates.
 
 Investigate as needed, then output a numbered, concrete plan describing exactly what changes you would make and why. The user will review and either approve, refine, or cancel before any change happens.
 
@@ -224,9 +230,23 @@ class CallStats:
         return self.prompt_tokens + self.completion_tokens
 
     def absorb_usage(self, usage, model: str, pricing: dict) -> None:
-        self.prompt_tokens += usage.prompt_tokens
-        self.completion_tokens += usage.completion_tokens
-        c = estimate_cost(pricing, model, usage.prompt_tokens, usage.completion_tokens)
+        # Tolerate both OpenAI chat.completions (prompt/completion) and
+        # Responses API (input/output) naming, plus missing usage.
+        if usage is None:
+            return
+        prompt = (
+            getattr(usage, "prompt_tokens", None)
+            or getattr(usage, "input_tokens", None)
+            or 0
+        )
+        completion = (
+            getattr(usage, "completion_tokens", None)
+            or getattr(usage, "output_tokens", None)
+            or 0
+        )
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        c = estimate_cost(pricing, model, prompt, completion)
         if c is not None:
             self.cost_usd = (self.cost_usd or 0.0) + c
 
@@ -792,10 +812,15 @@ class Agent:
             self.console.print(f"  [magenta]⇉[/magenta] {tag}")
             max_workers = min(self.cfg.max_parallel_workers, len(parallel_indices))
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {
-                    ex.submit(self._run_one_safe_tool, parsed[i][0], parsed[i][1], ctx): i
-                    for i in parallel_indices
-                }
+                futures = {}
+                for i in parallel_indices:
+                    name_i, args_i, _ = parsed[i]
+                    cached = ctx._get_cached_result(name_i, args_i)
+                    if cached is not None:
+                        parallel_results[i] = f"(cached — identical to previous {name_i} call; see earlier in this turn)"
+                        parallel_errors[i] = False
+                    else:
+                        futures[ex.submit(self._run_one_safe_tool, name_i, args_i, ctx)] = i
                 for fut in as_completed(futures):
                     i = futures[fut]
                     try:
@@ -832,13 +857,20 @@ class Agent:
                     self.console.print(f"  [red]✗[/red] {name}: unknown")
                 else:
                     self._announce_tool(name, args)
-                    try:
-                        r = fn(ctx, args)
-                        result_text, is_err = r.content, r.is_error
-                        self._emit_tool_result(name, result_text, is_err)
-                    except Exception as e:
-                        result_text, is_err = f"tool raised: {type(e).__name__}: {e}", True
-                        self.console.print(f"  [red]✗[/red] {name}: {e}")
+                    cached = ctx._get_cached_result(name, args)
+                    if cached is not None:
+                        result_text = f"(cached — identical to previous {name} call; see earlier in this turn)"
+                        is_err = False
+                        self._emit_tool_result(name, result_text, is_err, suffix=" (cached)")
+                    else:
+                        try:
+                            r = fn(ctx, args)
+                            result_text, is_err = r.content, r.is_error
+                            self._emit_tool_result(name, result_text, is_err)
+                            ctx._cache_result(name, args, result_text)
+                        except Exception as e:
+                            result_text, is_err = f"tool raised: {type(e).__name__}: {e}", True
+                            self.console.print(f"  [red]✗[/red] {name}: {e}")
 
             self.history.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": result_text}

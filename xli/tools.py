@@ -6,7 +6,9 @@ ToolResult(content, dirty_paths). Dirty paths are queued for end-of-turn sync.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
+import json
 import re
 import shlex
 import subprocess
@@ -79,6 +81,11 @@ class ToolContext:
     server_completion_tokens: int = 0
     server_cost: float = 0.0
     server_calls: int = 0
+    # Simple per-turn result cache for read-only / deterministic tools.
+    # Key: (tool_name, sorted_args_json). Value: result_text.
+    # Prevents re-emitting identical large outputs (read_file, grep, read_plan_notes)
+    # when the agent re-explores the same thing.
+    _tool_result_cache: dict = field(default_factory=dict)
 
     def record_server_usage(
         self, model: str, prompt_tokens: int, completion_tokens: int
@@ -104,6 +111,28 @@ class ToolContext:
         self.server_cost = 0.0
         self.server_calls = 0
         return out
+
+    def _get_cached_result(self, name: str, args: dict) -> Optional[str]:
+        """Return cached result text for a deterministic read-only tool call, or None."""
+        if name not in {"read_file", "list_dir", "glob", "grep", "search_project",
+                        "read_plan_notes", "plugin_search", "plugin_get"}:
+            return None
+        try:
+            key = (name, json.dumps(args, sort_keys=True))
+        except Exception:
+            return None
+        return self._tool_result_cache.get(key)
+
+    def _cache_result(self, name: str, args: dict, result_text: str) -> None:
+        """Store result for future identical calls in this turn."""
+        if name not in {"read_file", "list_dir", "glob", "grep", "search_project",
+                        "read_plan_notes", "plugin_search", "plugin_get"}:
+            return
+        try:
+            key = (name, json.dumps(args, sort_keys=True))
+            self._tool_result_cache[key] = result_text
+        except Exception:
+            pass
 
 
 # Bash intents — declared by the agent on every bash call so the human can
@@ -592,19 +621,138 @@ def t_plan_note(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     Hard-scoped: the path is fixed (<project>/.xli/plan-notes.md), there is
     no path argument, no edit, no delete. Append-only is load-bearing — it
     means the planner cannot accidentally clobber its own earlier notes.
+    Optional `return_notes_after` returns the full current scratchpad content
+    after the append (useful for staying coherent without a separate call).
     """
     from datetime import datetime, timezone
     text = (args.get("text") or "").strip()
     if not text:
         return ToolResult("plan_note: 'text' is required", is_error=True)
+
+    return_notes = bool(args.get("return_notes_after", False))
+
     notes_path = ctx.project.xli_dir / PLAN_NOTES_FILENAME
     notes_path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     block = f"\n## {ts}\n\n{text}\n"
     with notes_path.open("a", encoding="utf-8") as f:
         f.write(block)
+
+    if return_notes:
+        try:
+            content = notes_path.read_text(encoding="utf-8").strip()
+            return ToolResult(content or "(empty)")
+        except OSError as e:
+            return ToolResult(f"noted, but read failed: {e}", is_error=True)
+
     line_count = sum(1 for _ in notes_path.open("r", encoding="utf-8"))
     return ToolResult(f"noted ({line_count} lines in plan-notes.md)")
+
+
+def t_read_plan_notes(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Return the current content of .xli/plan-notes.md.
+
+    PLAN-MODE ONLY. Lets the agent re-read its own scratchpad after several
+    plan_note calls instead of only seeing the snapshot injected at turn start.
+    """
+    notes_path = ctx.project.xli_dir / PLAN_NOTES_FILENAME
+    if not notes_path.exists():
+        return ToolResult("(empty — first plan_note call will create it)")
+    try:
+        content = notes_path.read_text(encoding="utf-8").strip()
+        return ToolResult(content or "(empty)")
+    except OSError as e:
+        return ToolResult(f"read error: {e}", is_error=True)
+
+
+def t_summarize_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Compact structural summary of a file instead of dumping raw source.
+
+    Greatly reduces token usage during investigation while still giving the
+    model the information it needs (imports, classes, functions, signatures).
+    """
+    path = _resolve_in_project(ctx, args["path"])
+    if not path.exists() or not path.is_file():
+        return ToolResult(f"file not found: {args['path']}", is_error=True)
+
+    rel = path.relative_to(ctx.project.project_root.resolve()).as_posix()
+    if _is_ignored(ctx, rel):
+        return ToolResult(
+            f"refused: {args['path']} is in the project's ignore list",
+            is_error=True,
+        )
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return ToolResult(f"read error: {e}", is_error=True)
+
+    lines = text.splitlines()
+    total_lines = len(lines)
+
+    if path.suffix == ".py":
+        summary = _summarize_python_file(rel, text, total_lines)
+    else:
+        summary = _summarize_generic(rel, lines, total_lines)
+
+    return ToolResult(_truncate(summary))
+
+
+def _summarize_python_file(rel: str, text: str, total_lines: int) -> str:
+    """Python-specific summary using AST (top-level only for cleanliness)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _summarize_generic(rel, text.splitlines(), total_lines)
+
+    imports = []
+    classes = []
+    functions = []
+
+    for node in tree.body:  # only top-level nodes
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            names = ", ".join(a.name for a in node.names)
+            imports.append(f"from {mod} import {names}")
+        elif isinstance(node, ast.ClassDef):
+            bases = [b.id if isinstance(b, ast.Name) else "..." for b in node.bases]
+            base_str = f"({', '.join(bases)})" if bases else ""
+            doc = ast.get_docstring(node) or ""
+            first_doc = doc.split("\n")[0][:80] if doc else ""
+            classes.append(f"class {node.name}{base_str}: {first_doc}")
+        elif isinstance(node, ast.FunctionDef):
+            args = [arg.arg for arg in node.args.args]
+            if node.args.vararg:
+                args.append("*" + node.args.vararg.arg)
+            if node.args.kwarg:
+                args.append("**" + node.args.kwarg.arg)
+            doc = ast.get_docstring(node) or ""
+            first_doc = doc.split("\n")[0][:60] if doc else ""
+            functions.append(f"def {node.name}({', '.join(args)}): {first_doc}")
+
+    out = [f"File: {rel} ({total_lines} lines)\n"]
+    if imports:
+        out.append("Imports:\n" + "\n".join(f"  - {imp}" for imp in imports[:15]))
+    if classes:
+        out.append("\nClasses:\n" + "\n".join(f"  - {c}" for c in classes[:12]))
+    if functions:
+        out.append("\nTop-level functions:\n" + "\n".join(f"  - {f}" for f in functions[:15]))
+
+    if not imports and not classes and not functions:
+        return _summarize_generic(rel, text.splitlines(), total_lines)
+
+    return "\n".join(out)
+
+
+def _summarize_generic(rel: str, lines: list[str], total_lines: int) -> str:
+    """Generic fallback for non-Python or when AST fails."""
+    head = "\n".join(f"{i+1:4}: {ln}" for i, ln in enumerate(lines[:25]))
+    tail_start = max(1, total_lines - 7)
+    tail = "\n".join(f"{i+1:4}: {ln}" for i, ln in enumerate(lines[-8:], start=tail_start))
+    return f"File: {rel} ({total_lines} lines)\n\n--- head ---\n{head}\n\n--- tail ---\n{tail}"
 
 
 # --------------------------------------------------------------------------- #
@@ -628,6 +776,8 @@ REGISTRY: dict[str, ToolFn] = {
     "plugin_search": t_plugin_search,
     "plugin_get": t_plugin_get,
     "plan_note": t_plan_note,
+	    "read_plan_notes": t_read_plan_notes,
+    "summarize_file": t_summarize_file,
 }
 
 # Workers are read-only investigators: same toolset minus mutation + no swarm.
@@ -652,6 +802,7 @@ PARALLEL_SAFE: set[str] = {
     "plugin_search",
     "plugin_get",
     "dispatch_subagent",
+    "summarize_file",
 }
 
 # Tools available in PLAN MODE.
@@ -672,6 +823,8 @@ PLAN_MODE_TOOLS: set[str] = {
     "plugin_search",
     "plugin_get",
     "plan_note",
+    "read_plan_notes",
+    "summarize_file",
 }
 
 
@@ -689,6 +842,20 @@ def tool_schemas() -> list[dict]:
                         "path": {"type": "string", "description": "Project-relative path"},
                         "offset": {"type": "integer", "description": "0-based start line"},
                         "limit": {"type": "integer", "description": "Max lines to return"},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "summarize_file",
+                "description": "Return a compact structural summary of a file (imports, classes with bases, function signatures + first docstring line). Much lower token cost than read_file during investigation. Works best on Python files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Project-relative path"},
                     },
                     "required": ["path"],
                 },
@@ -941,8 +1108,27 @@ def tool_schemas() -> list[dict]:
                             "type": "string",
                             "description": "The note text to append. A timestamp is added automatically.",
                         },
+                        "return_notes_after": {
+                            "type": "boolean",
+                            "description": "If true, return the full updated scratchpad content after appending (instead of just the line count).",
+                        },
                     },
                     "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_plan_notes",
+                "description": (
+                    "PLAN-MODE ONLY. Read the current content of .xli/plan-notes.md. "
+                    "Use this to re-inspect your scratchpad after several plan_note calls "
+                    "instead of relying only on the initial snapshot at the start of the turn."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                 },
             },
         },
