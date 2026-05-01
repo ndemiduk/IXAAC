@@ -43,7 +43,7 @@ You can dispatch parallel worker agents via dispatch_subagent. Workers are read-
 
 Conventions:
 - Project paths are POSIX-style and relative to the project root.
-- Prefer search_project + read_file before guessing. Use grep/glob for exact matches.
+- Prefer search_project and summarize_file over read_file on large files. read_file is expensive — use it only when you need surrounding context the RAG didn't give you.
 - Use edit_file for surgical changes; write_file only for new files or full rewrites.
 - Be terse. Don't narrate; just do the work and report what changed.
 
@@ -57,7 +57,9 @@ Verification (mandatory before declaring success):
 - If verification fails, fix the issues before ending the turn. Do not hand off broken code with a promise it'll work.
 - For UI/GUI/network code that can't be exercised headlessly, say so explicitly ("imports cleanly; GUI not testable from this environment") rather than claiming success.
 
-Don't panic — verify anyway. The answer is 42, but working code is what matters here."""
+Don't panic — verify anyway. The answer is 42, but working code is what matters here.
+
+Prefer answering directly from recent conversation history or general knowledge when the question is informational. Only use tools when you need fresh project state, must verify behavior, or are making changes. Be decisive."""
 
 
 WORKER_SYSTEM_PROMPT = """You are a worker agent dispatched by XLI to investigate a focused task and return a concise summary.
@@ -180,7 +182,7 @@ PLAN_MODE_PREAMBLE = """[PLAN MODE ACTIVE]
 You cannot modify project content in this turn. Your tools are read-only investigation (read_file, list_dir, glob, grep, search_project, web_search, x_search, plugin_search, plugin_get, summarize_file) plus one scoped write tool: plan_note (supports optional `return_notes_after`). No write_file, no edit_file, no bash, no dispatch_subagent.
 
 EFFICIENCY RULES (important for long investigations):
-- Prefer `search_project` and `summarize_file` over raw `read_file` on large modules. Only fall back to full reads when you need surrounding context the summary/RAG didn't provide.
+- Prefer `search_project` and `summarize_file` over raw `read_file` on large modules. Full reads are heavily truncated in history to control token usage.
 - Use `plan_note` + `read_plan_notes` heavily to keep state outside the growing transcript.
 - The result cache will tell you when you're repeating a call — use that information instead of re-reading.
 - Keep individual tool outputs focused. Long investigations accumulate tokens fast if you re-read the same files.
@@ -197,6 +199,11 @@ PLAN_MODE_NOTES_EMPTY = "(empty — first plan_note call will create it)"
 PLAN_MODE_USER_HEADER = "\n\nUser's request:\n"
 
 
+# Token usage controls
+HISTORY_KEEP_TURNS = 2          # recent full turns kept verbatim (aggressive for token control)
+MAX_TOOL_RESULT_CHARS = 1024    # beyond this, tool results get truncated in history
+
+
 def _read_plan_notes(project) -> str:
     """Load .xli/plan-notes.md content for injection into the plan-mode preamble.
     Returns the empty-state placeholder if missing or unreadable.
@@ -208,6 +215,8 @@ def _read_plan_notes(project) -> str:
         content = notes_path.read_text(encoding="utf-8").strip()
     except OSError:
         return PLAN_MODE_NOTES_EMPTY
+    if len(content) > 4000:
+        content = content[:3500] + "\n\n[... plan-notes truncated for this turn to control context; full file still on disk.]"
     return content or PLAN_MODE_NOTES_EMPTY
 
 
@@ -525,9 +534,92 @@ class Agent:
             sections.append("")
         return "\n".join(sections)
 
+    def condense_history(self) -> None:
+        """Reduce token usage by keeping only recent turns in full detail.
+
+        Older history is replaced by a short summary note. This is the main
+        lever for keeping follow-up turns cheap.
+        """
+        if len(self.history) <= 2:
+            return
+
+        keep = 1 + (HISTORY_KEEP_TURNS * 2)
+
+        if len(self.history) <= keep:
+            self._scrub_old_tool_results()
+            return
+
+        dropped = len(self.history) - keep
+        summary = (
+            f"[History condensed — {dropped} older messages dropped. "
+            f"Recent context kept. Use search_project for older details.]"
+        )
+
+        self.history = [self.history[0]] + self.history[-keep + 1 :]
+
+        if len(self.history) > 1:
+            self.history.insert(1, {"role": "system", "content": summary})
+
+        self._scrub_old_tool_results()
+
+    def _scrub_old_tool_results(self) -> None:
+        """Further truncate tool role messages to protect token budget.
+        Keeps the most recent 3 tool results full; everything older (even
+        within the 'kept' window) gets a short stub. This is the main
+        defense against 900k+ token blowups from many read_file / grep /
+        search_project calls across a long session.
+        """
+        tool_msgs = [i for i, m in enumerate(self.history) if m.get("role") == "tool"]
+        if len(tool_msgs) <= 2:
+            return
+        # Keep last 2 full, stub the rest (even recent-but-not-last ones)
+        for idx in tool_msgs[:-2]:
+            msg = self.history[idx]
+            content = msg.get("content") or ""
+            if len(content) > 220:
+                msg["content"] = (
+                    content[:160]
+                    + f"\n[... truncated in condensation ({len(content)} chars). Use search_project/summarize_file.]"
+                )
+
     @property
     def clients(self) -> Clients:
         return self.pool.primary()
+
+    def _is_likely_direct_question(self, message: str) -> bool:
+        """Conservative fast-path detector.
+        Only returns True for clearly informational questions that do not require
+        editing, testing, or fresh verification. We err on the side of using tools.
+        """
+        if self.plan_mode:
+            return False
+
+        msg = message.lower().strip()
+
+        # Never fast-path anything that sounds like an action or verification
+        action_signals = {
+            "edit", "change", "fix", "implement", "add", "create", "write", "refactor",
+            "delete", "remove", "update", "test", "run", "verify", "check", "build",
+            "commit", "push", "deploy"
+        }
+        if any(sig in msg for sig in action_signals):
+            return False
+
+        # Short, clearly explanatory questions
+        if len(message) < 110:
+            explanatory = {"what", "how", "explain", "why", "where", "show", "describe"}
+            if any(word in msg for word in explanatory):
+                return True
+
+        # Common low-risk patterns
+        low_risk_phrases = [
+            "current file", "what are we", "last change", "summary of",
+            "what does", "how does this", "tell me about"
+        ]
+        if any(phrase in msg for phrase in low_risk_phrases):
+            return True
+
+        return False
 
     def run_turn(self, user_message: str) -> tuple[str, set[str], TurnStats]:
         # Refresh the system prompt so /doc and /undoc take effect immediately.
@@ -545,7 +637,13 @@ class Agent:
             )
             schemas = plan_mode_schemas()
         else:
-            schemas = tool_schemas() + [dispatch_subagent_schema()]
+            if self._is_likely_direct_question(user_message):
+                # Fast path: reduced read-only schemas only.
+                # Avoids edit_file, write_file, bash, dispatch_subagent, web_search, etc.
+                from xli.tools import worker_tool_schemas
+                schemas = worker_tool_schemas()
+            else:
+                schemas = tool_schemas() + [dispatch_subagent_schema()]
         if self.project.local_only:
             schemas = [s for s in schemas if s["function"]["name"] != "search_project"]
         # Hide plugin_search / plugin_get when no plugins are subscribed —
@@ -623,6 +721,7 @@ class Agent:
                 # Content was already streamed live; return empty text so the
                 # REPL doesn't print it again. The history still holds the real
                 # content for the next turn's context.
+                self.condense_history()
                 return ("" if streamed else (msg.content or ""), ctx.dirty_paths, stats)
 
             self._execute_tool_batch(msg.tool_calls, ctx, stats)
@@ -634,6 +733,7 @@ class Agent:
                 stats.orch.absorb_server_tool(in_t, out_t, cost)
                 stats.server_tool_calls += n
 
+        self.condense_history()
         return (
             "(stopped: hit max_tool_iterations — bump it in config if needed)",
             ctx.dirty_paths,
@@ -872,6 +972,15 @@ class Agent:
                             result_text, is_err = f"tool raised: {type(e).__name__}: {e}", True
                             self.console.print(f"  [red]✗[/red] {name}: {e}")
 
+            # Truncate long tool results so one big read_file doesn't poison
+            # many future turns with 10k+ tokens.
+            if len(result_text) > MAX_TOOL_RESULT_CHARS:
+                result_text = (
+                    result_text[:MAX_TOOL_RESULT_CHARS]
+                    + f"\n\n[... {len(result_text) - MAX_TOOL_RESULT_CHARS} chars truncated. "
+                    f"Use search_project or summarize_file for details.]"
+                )
+
             self.history.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": result_text}
             )
@@ -901,6 +1010,8 @@ class Agent:
         if not task:
             return ("dispatch_subagent: 'task' is required", CallStats())
         context = args.get("context")
+        if context and len(context) > 2000:
+            context = context[:1950] + "\n... [context truncated for worker]"
         from xli.plugin import load_subscriptions
         worker_clients = self.pool.acquire()
         worker = WorkerAgent(

@@ -20,7 +20,7 @@ from xli.client import Clients
 from xli.config import GlobalConfig, ProjectConfig
 
 # How much of a long output to keep before truncating, per tool call.
-MAX_OUTPUT_BYTES = 30_000
+MAX_OUTPUT_BYTES = 10_000
 
 
 # Worker read-only guard. Catches the classics (rm, pip install, git push, eval).
@@ -563,7 +563,7 @@ def t_plugin_get(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def t_search_project(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = args["query"]
-    limit = int(args.get("limit", 10))
+    limit = int(args.get("limit", 6))
     mode = args.get("retrieval_mode", ctx.cfg.retrieval_mode)
 
     # Build the collection set: project's own + any /ref-attached personas.
@@ -603,7 +603,10 @@ def t_search_project(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         )
         score = getattr(ch, "score", None)
         header = f"[{i}] {name}" + (f"  (score={score:.3f})" if isinstance(score, float) else "")
-        out.append(header + "\n" + text.strip())
+        chunk_text = text.strip()
+        if len(chunk_text) > 900:
+            chunk_text = chunk_text[:850] + "\n... [truncated]"
+        out.append(header + "\n" + chunk_text)
     return ToolResult(_truncate("\n\n---\n\n".join(out)))
 
 
@@ -668,8 +671,9 @@ def t_read_plan_notes(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 def t_summarize_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Compact structural summary of a file instead of dumping raw source.
 
-    Greatly reduces token usage during investigation while still giving the
-    model the information it needs (imports, classes, functions, signatures).
+    Greatly reduces token usage during investigation. Use `focus` to get
+    exactly what you need (e.g. "signatures", "imports", "classes", "functions").
+    Much lower token cost than read_file.
     """
     path = _resolve_in_project(ctx, args["path"])
     if not path.exists() or not path.is_file():
@@ -682,6 +686,8 @@ def t_summarize_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             is_error=True,
         )
 
+    focus = (args.get("focus") or "all").lower().strip()
+
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
@@ -691,15 +697,15 @@ def t_summarize_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     total_lines = len(lines)
 
     if path.suffix == ".py":
-        summary = _summarize_python_file(rel, text, total_lines)
+        summary = _summarize_python_file(rel, text, total_lines, focus)
     else:
         summary = _summarize_generic(rel, lines, total_lines)
 
     return ToolResult(_truncate(summary))
 
 
-def _summarize_python_file(rel: str, text: str, total_lines: int) -> str:
-    """Python-specific summary using AST (top-level only for cleanliness)."""
+def _summarize_python_file(rel: str, text: str, total_lines: int, focus: str = "all") -> str:
+    """Python-specific summary using AST. Supports focus modes for lower token use."""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -734,15 +740,23 @@ def _summarize_python_file(rel: str, text: str, total_lines: int) -> str:
             functions.append(f"def {node.name}({', '.join(args)}): {first_doc}")
 
     out = [f"File: {rel} ({total_lines} lines)\n"]
-    if imports:
+
+    if focus in ("all", "imports") and imports:
         out.append("Imports:\n" + "\n".join(f"  - {imp}" for imp in imports[:15]))
-    if classes:
+    if focus in ("all", "classes", "signatures") and classes:
         out.append("\nClasses:\n" + "\n".join(f"  - {c}" for c in classes[:12]))
-    if functions:
+    if focus in ("all", "functions", "signatures") and functions:
         out.append("\nTop-level functions:\n" + "\n".join(f"  - {f}" for f in functions[:15]))
 
-    if not imports and not classes and not functions:
-        return _summarize_generic(rel, text.splitlines(), total_lines)
+    # Fallback if focus filtered everything out
+    if len(out) == 1:
+        if focus == "imports" and not imports:
+            return _summarize_generic(rel, text.splitlines(), total_lines)
+        # default to showing what we have
+        if classes:
+            out.append("\nClasses:\n" + "\n".join(f"  - {c}" for c in classes[:12]))
+        if functions:
+            out.append("\nTop-level functions:\n" + "\n".join(f"  - {f}" for f in functions[:15]))
 
     return "\n".join(out)
 
@@ -835,7 +849,7 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read a UTF-8 text file from the project. Output is line-numbered.",
+                "description": "Read a UTF-8 text file from the project (line-numbered output).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -851,11 +865,16 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "summarize_file",
-                "description": "Return a compact structural summary of a file (imports, classes with bases, function signatures + first docstring line). Much lower token cost than read_file during investigation. Works best on Python files.",
+                "description": "Compact structural summary of a file (focus on signatures/imports/classes/functions). Cheaper than read_file.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Project-relative path"},
+                        "focus": {
+                            "type": "string",
+                            "description": "What to extract: 'all' (default), 'signatures', 'imports', 'classes', 'functions'",
+                            "enum": ["all", "signatures", "imports", "classes", "functions"]
+                        },
                     },
                     "required": ["path"],
                 },
@@ -937,15 +956,9 @@ def tool_schemas() -> list[dict]:
             "function": {
                 "name": "bash",
                 "description": (
-                    "Run a shell command in the project root. Capture stdout/stderr/exit code. "
-                    "You MUST declare `intent` honestly — it's used to gate risky commands on user "
-                    "confirmation. Lying about intent to skip the gate is a serious bug; declare "
-                    "the strongest applicable category. Use `read-only` for inspection only "
-                    "(ls, cat, grep, find, git status/log/diff, pytest). Use `modifies-project` "
-                    "for in-tree edits via shell (git add/commit, sed -i on project files). Use "
-                    "`modifies-system` for anything outside the project root, anything needing "
-                    "sudo, or system config. Use `network` for any command that reaches the "
-                    "internet (curl, wget, pip install, npm install, git push/pull/fetch)."
+                    "Run a shell command in the project root. Must honestly declare `intent` "
+                    "(read-only / modifies-project / modifies-system / network). "
+                    "Lying about intent is a serious bug."
                 ),
                 "parameters": {
                     "type": "object",
@@ -954,7 +967,7 @@ def tool_schemas() -> list[dict]:
                         "intent": {
                             "type": "string",
                             "enum": ["read-only", "modifies-project", "modifies-system", "network"],
-                            "description": "Honest declaration of what this command will do.",
+                            "description": "Honest category of what the command does.",
                         },
                         "timeout": {"type": "integer", "description": "Seconds, default 60"},
                     },
@@ -966,7 +979,7 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "search_project",
-                "description": "Hybrid RAG search across the project's xAI Collection. Returns top-k matching chunks with file names.",
+                "description": "Hybrid RAG search over the project's codebase. Returns top matching chunks + filenames.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -985,16 +998,11 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": (
-                    "Search the live web via xAI Live Search. Use for current docs, recent "
-                    "library versions, breaking changes, error messages you can't resolve from "
-                    "project context. Returns answer text + citations. Prefer search_project "
-                    "for anything inside the project."
-                ),
+                "description": "Search the live web (current docs, versions, errors outside project). Prefer search_project for in-project info.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Natural-language search query"},
+                        "query": {"type": "string", "description": "Natural language query"},
                         "allowed_domains": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -1014,20 +1022,15 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "x_search",
-                "description": (
-                    "Search posts on X (Twitter) via xAI Live Search. Use for real-time "
-                    "developer chatter, trending issues, official announcements from project "
-                    "maintainers, or community sentiment about a library. Returns answer text "
-                    "+ citations. Prefer web_search for stable docs and articles."
-                ),
+                "description": "Search X (Twitter) posts for real-time chatter or announcements. Prefer web_search for stable docs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Natural-language query about X posts"},
+                        "query": {"type": "string", "description": "Natural language query about X posts"},
                         "allowed_x_handles": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Restrict to these handles (max 10). e.g. ['xai', 'elonmusk']",
+                            "description": "Restrict to these handles (max 10).",
                         },
                         "excluded_x_handles": {
                             "type": "array",
@@ -1047,21 +1050,13 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "plugin_search",
-                "description": (
-                    "Search the project's subscribed plugins by intent. Returns top "
-                    "matches with id, score, risk, and one-line description. If no "
-                    "match, returns NO_PLUGIN_MATCH — when you see that, tell the user "
-                    "no plugin was found and DO NOT fabricate plugin output. Plugins "
-                    "are user-curated markdown files describing external APIs; once "
-                    "you find a candidate, call plugin_get to read its full doc, then "
-                    "compose a curl call via the bash tool to actually invoke the API."
-                ),
+                "description": "Search subscribed plugins by intent. Returns matches with id/score/risk. Use plugin_get to read full docs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "intent": {
                             "type": "string",
-                            "description": "Natural-language description of what data/action you need (e.g. 'current weather in seattle', 'recent SEC filings for tesla').",
+                            "description": "What data or action you need (e.g. current weather, recent filings).",
                         },
                     },
                     "required": ["intent"],
@@ -1072,12 +1067,7 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "plugin_get",
-                "description": (
-                    "Read the full markdown content of a subscribed plugin. Use after "
-                    "plugin_search identifies a candidate. The doc contains endpoints, "
-                    "auth requirements, curl examples, and gotchas — read it before "
-                    "composing the actual API call."
-                ),
+                "description": "Read full markdown of a subscribed plugin (endpoints, auth, examples).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1091,26 +1081,17 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "plan_note",
-                "description": (
-                    "PLAN-MODE ONLY. Append a free-form note to your scratchpad at "
-                    ".xli/plan-notes.md. The scratchpad survives across iterations and "
-                    "across /exit, so future turns (including after a max-iteration "
-                    "abort) can resume from your prior findings. Use it liberally to "
-                    "capture: files you've checked, things you've ruled out, open "
-                    "questions, partial conclusions. Append-only — you cannot edit or "
-                    "delete prior notes, so if you change your mind, append a "
-                    "correction rather than trying to overwrite."
-                ),
+                "description": "PLAN-MODE ONLY. Append a note to the persistent scratchpad (.xli/plan-notes.md).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "text": {
                             "type": "string",
-                            "description": "The note text to append. A timestamp is added automatically.",
+                            "description": "Note text to append (timestamp added automatically).",
                         },
                         "return_notes_after": {
                             "type": "boolean",
-                            "description": "If true, return the full updated scratchpad content after appending (instead of just the line count).",
+                            "description": "If true, return full updated scratchpad instead of just line count.",
                         },
                     },
                     "required": ["text"],
@@ -1121,11 +1102,7 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_plan_notes",
-                "description": (
-                    "PLAN-MODE ONLY. Read the current content of .xli/plan-notes.md. "
-                    "Use this to re-inspect your scratchpad after several plan_note calls "
-                    "instead of relying only on the initial snapshot at the start of the turn."
-                ),
+                "description": "PLAN-MODE ONLY. Read the current content of .xli/plan-notes.md scratchpad.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -1136,13 +1113,7 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "code_execute",
-                "description": (
-                    "Execute Python in xAI's sandbox to verify behavior, prototype logic, or "
-                    "do computations. NumPy/Pandas/Matplotlib/SciPy preinstalled. Pass either "
-                    "a description of what to compute or actual Python code. The model writes "
-                    "and runs the code server-side and returns the result. For project-local "
-                    "verification, use bash + python instead — this is for isolated snippets."
-                ),
+                "description": "Execute Python in xAI sandbox (NumPy/Pandas/etc preinstalled). For project code use bash instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1176,19 +1147,15 @@ def dispatch_subagent_schema() -> dict:
         "function": {
             "name": "dispatch_subagent",
             "description": (
-                "Dispatch a read-only worker agent on a focused investigation task. "
-                "Workers run in parallel when multiple are dispatched in the same batch. "
-                "Workers can use search_project, read_file, list_dir, glob, grep, bash. "
-                "They cannot modify files. Workers see ONLY the brief — write a tight, "
-                "self-contained task description. Use `context` to pass relevant snippets. "
-                "Returns the worker's final summary as a string."
+                "Dispatch a read-only worker agent. Workers run in parallel, see only the brief, "
+                "can use search/read tools but cannot modify files. Returns worker summary."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "The investigation task. Be specific about what you want back.",
+                        "description": "The investigation task. Be specific.",
                     },
                     "context": {
                         "type": "string",

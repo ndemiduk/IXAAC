@@ -555,6 +555,47 @@ def _run_shell_passthrough(user_input: str, cwd: Path) -> bool:
         console.print(f"[dim]exit {rc}[/dim]")
     return True
 
+
+def _show_history_stats(agent, persona=None) -> None:
+    """Display current in-memory chat history size and rough token estimate.
+
+    Uses char-count heuristic (~4 chars per token). The condensation
+    keeps the system prompt + last ~HISTORY_KEEP_TURNS turns + note,
+    plus aggressively scrubs older tool results even in the kept window.
+    """
+    from xli.transcript import count_turns as _count_turns
+    from xli.agent import HISTORY_KEEP_TURNS
+
+    n_disk = 0
+    if persona is not None and hasattr(persona, "turns_dir"):
+        try:
+            n_disk = _count_turns(persona.turns_dir)
+        except Exception:
+            n_disk = 0
+    n_msgs = len(getattr(agent, "history", []))
+    total_chars = 0
+    for m in getattr(agent, "history", []):
+        content = m.get("content") or ""
+        if isinstance(content, str):
+            total_chars += len(content)
+        tc = m.get("tool_calls") or []
+        total_chars += sum(len(str(t)) for t in tc)
+    est_tokens = max(0, total_chars // 4)
+
+    console.print(
+        f"history: [bold]{n_msgs} msgs[/bold]  ~[cyan]{est_tokens:,} tok[/cyan] (heuristic)"
+    )
+    if n_disk:
+        console.print(f"  turns persisted: {n_disk}")
+    console.print(f"  condensation: keeps last {HISTORY_KEEP_TURNS} turns + scrubs old tool results")
+    # Peek for condensation marker
+    for m in getattr(agent, "history", [])[:3]:
+        c = str(m.get("content") or "")
+        if "History condensed" in c or "condensed" in c.lower():
+            console.print("  [dim]→ condensation note is in context[/dim]")
+            break
+
+
 console = Console()
 
 
@@ -578,6 +619,7 @@ SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /undoc <name>         Detach a previously-attached doc
   /lib [...]            Plugin library: list / all / subscribe / unsubscribe / remove
   /get <intent>         Find + invoke a subscribed plugin matching the intent
+  /history              Show current in-memory history size + rough token estimate
   /status               Show project state (collection, pool, mode flags, refs, docs)
   /projects             List registered projects (current marked ●)
 
@@ -2566,6 +2608,9 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             else:
                 console.print(f"  attached docs: [dim](none)[/dim]")
             continue
+        if user_input == "/history":
+            _show_history_stats(agent, persona)
+            continue
         if user_input == "/personas":
             _chat_list_personas()
             continue
@@ -2673,6 +2718,7 @@ CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
   /lib [...]            Plugin library: list / all / subscribe / unsubscribe / remove
   /get <intent>         Find + invoke a subscribed plugin matching the intent
   /status               Show persona state (turns on disk, attached refs/docs)
+	  /history              Show current in-memory history size + rough token estimate
   /sync                 Sync turn-files to the Collection now
   /yolo / /safe         Toggle bash confirmation gate
 
@@ -2772,6 +2818,9 @@ def cmd_code(args: argparse.Namespace) -> int:
             continue
         if user_input == "/help":
             console.print(SLASH_HELP)
+            continue
+        if user_input == "/history":
+            _show_history_stats(agent)
             continue
         if user_input == "/models":
             override = (
