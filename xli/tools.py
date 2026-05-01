@@ -963,14 +963,7 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": (
-                    "Read a UTF-8 text file from the project (line-numbered output). "
-                    "When you have already located the relevant function or class via grep "
-                    "or summarize_file, prefer a single comprehensive read covering the entire "
-                    "definition plus surrounding context (typically 80-200 lines) rather than "
-                    "multiple small overlapping windows. Use offset/limit only for genuinely "
-                    "narrow slices."
-                ),
+                "description": "Read a UTF-8 text file from the project (line-numbered output).",
                 "parameters": {
                     "type": "object",
                     "properties": {
