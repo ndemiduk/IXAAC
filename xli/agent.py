@@ -59,6 +59,7 @@ Verification (mandatory before declaring success):
 - Never claim that code "works", "is ready to run", "is verified", or "passes tests" unless you have actually run something that proves it. State results, don't predict them.
 - If verification fails, fix the issues before ending the turn. Do not hand off broken code with a promise it'll work.
 - For UI/GUI/network code that can't be exercised headlessly, say so explicitly ("imports cleanly; GUI not testable from this environment") rather than claiming success.
+- When using grep to verify a removal/rename, pass `--exclude-dir=__pycache__` (compiled .pyc files retain the old name as binary matches and don't reflect source state). Treat grep exit code 1 with no output as "clean — no matches"; that's success, not failure.
 
 Don't panic — verify anyway. The answer is 42, but working code is what matters here.
 
@@ -790,15 +791,21 @@ class Agent:
         model = stats.orch.model
         cache_hdrs = _cache_headers(self.project.conversation_id)
 
-        # Resolve temperature for this turn: one-shot /temp override wins,
-        # otherwise the configured orchestrator temperature.
+        # Resolve base temperature for this turn: one-shot /temp override wins,
+        # otherwise the configured orchestrator temperature. `temperature_locked`
+        # records whether the base value should stay fixed for every iteration
+        # (explicit user choice or trivial path), so the follow-through decay
+        # below doesn't override an authoritative request.
         if self.next_turn_temp_override is not None:
-            temperature = self.next_turn_temp_override
+            base_temperature = self.next_turn_temp_override
+            temperature_locked = True
             self.next_turn_temp_override = None
         elif intent == "trivial":
-            temperature = 0.0
+            base_temperature = 0.0
+            temperature_locked = True
         else:
-            temperature = self.cfg.orchestrator_temp()
+            base_temperature = self.cfg.orchestrator_temp()
+            temperature_locked = False
 
         profile_on = _profile_enabled()
         for _ in range(self.cfg.max_tool_iterations):
@@ -811,6 +818,18 @@ class Agent:
                 pre_msgs = len(self.history)
                 pre_chars = _history_chars(self.history)
                 t_start = time.perf_counter()
+
+            # Per-iteration temperature: first N iters at the base value
+            # (creative planning + tool strategy), iter N+1 onwards drops to
+            # follow-through temp (execution mode — tools chosen, just need
+            # to act). Skip when temperature_locked: respects /temp overrides
+            # and trivial-path 0.0. Never *raises* temperature on follow-through
+            # — if base is already lower than follow_through_temperature, keep
+            # the lower value (min of the two).
+            if temperature_locked or iter_idx <= self.cfg.follow_through_iter_threshold:
+                temperature = base_temperature
+            else:
+                temperature = min(base_temperature, self.cfg.follow_through_temperature)
 
             # Hard safety net: on the last 2 iterations of the budget, force
             # the model to produce a textual answer instead of more tool calls.

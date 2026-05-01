@@ -24,6 +24,15 @@ DEFAULT_RETRIEVAL_MODE = "hybrid"
 DEFAULT_ORCH_TEMP = 0.7
 DEFAULT_WORKER_TEMP = 0.3
 
+# Follow-through temperature decay. After the first 2 iterations of a turn,
+# the orchestrator switches from creative-planning mode to execution mode:
+# tools chosen, context loaded, just need to act and verify. Lower temperature
+# at this stage compresses the iteration-count variance Grok itself reported
+# ("2-4× fewer iters"). Plays only on the substantive path; trivial chatter
+# already uses 0.0, and explicit /temp one-shot overrides are respected.
+DEFAULT_FOLLOW_THROUGH_TEMP = 0.3
+DEFAULT_FOLLOW_THROUGH_ITER = 2  # iters 1..N use base; iter N+1 onward decays
+
 
 @dataclass
 class KeyPair:
@@ -46,6 +55,8 @@ CONFIG_TEMPLATE = {
     "model": DEFAULT_MODEL,
     "orchestrator_temperature": DEFAULT_ORCH_TEMP,
     "worker_temperature": DEFAULT_WORKER_TEMP,
+    "follow_through_temperature": DEFAULT_FOLLOW_THROUGH_TEMP,
+    "follow_through_iter_threshold": DEFAULT_FOLLOW_THROUGH_ITER,
     "retrieval_mode": DEFAULT_RETRIEVAL_MODE,
     "team_id": "",
     "keys": [],
@@ -81,6 +92,8 @@ class GlobalConfig:
     router_model: Optional[str] = None                   # cheap/fast classifier for initial chatter
     orchestrator_temperature: float = DEFAULT_ORCH_TEMP
     worker_temperature: float = DEFAULT_WORKER_TEMP
+    follow_through_temperature: float = DEFAULT_FOLLOW_THROUGH_TEMP
+    follow_through_iter_threshold: int = DEFAULT_FOLLOW_THROUGH_ITER
     retrieval_mode: str = DEFAULT_RETRIEVAL_MODE
     max_file_bytes: int = 1_000_000
     max_tool_iterations: int = 25  # Lower default + tool_choice="none" safety net + edit-failure rule bounds spirals. Progressive nudges at ~6/12/20.
