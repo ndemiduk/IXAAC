@@ -2744,8 +2744,10 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             console.print("[green]safe mode ON[/green] — bash gate enabled")
             continue
 
-        # Real conversation turn.
-        console.print(f"[bold cyan]You:[/bold cyan] {user_input}")
+        # Real conversation turn. prompt_toolkit already echoes the input on
+        # the `›` line and AI responses render in bold green for visual
+        # separation, so a manual second-echo would just duplicate the user's
+        # text on screen.
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
         except Exception as e:
@@ -3080,7 +3082,6 @@ def cmd_code(args: argparse.Namespace) -> int:
             else:
                 console.print("[green]plan approved — executing[/green]")
 
-        console.print(f"[bold cyan]You:[/bold cyan] {user_input}")
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
         except Exception as e:

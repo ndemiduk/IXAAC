@@ -274,11 +274,18 @@ def _normalize_indent(text: str, start: int, new: str) -> str:
         return new
     line_start = text.rfind("\n", 0, start) + 1
     matched_indent = text[line_start:start]
-    if matched_indent and matched_indent.strip() == "":
-        # The matched span starts immediately after pure-whitespace indent.
-        # That indent is already in text[:start]; strip any indent on `new`.
-        return new.lstrip(" \t")
-    return new
+    # Strip new's leading whitespace whenever the matched span starts at the
+    # logical beginning of a line — either at column 0 or right after pure
+    # whitespace indent. In both cases text[:start] already preserves the
+    # file's actual indent (empty, tabs, spaces — whatever it is) and any
+    # leading whitespace on `new` is additive: it doubles existing indent or
+    # invents indent where none belongs. The trace-007 case was a column-0
+    # top-level import where the model's `new` had a spurious tab — exactly
+    # the bug an empty-indent guard misses.
+    if matched_indent.strip() != "":
+        # Match starts mid-line after non-whitespace — leave new as-is.
+        return new
+    return new.lstrip(" \t")
 
 
 def _whitespace_fuzzy_pattern(old: str) -> Optional[re.Pattern]:
