@@ -13,6 +13,7 @@ from prompt_toolkit import PromptSession, prompt
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 
 from xli import __version__
@@ -2751,7 +2752,7 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
         except Exception as e:
-            console.print(f"[red]turn failed: {e}[/red]")
+            console.print(f"[red]turn failed: {rich_escape(str(e))}[/red]")
             continue
 
         # Pull the assistant's final reply out of history (works whether the
@@ -3085,7 +3086,7 @@ def cmd_code(args: argparse.Namespace) -> int:
         try:
             text, dirty, turn_stats = agent.run_turn(user_input)
         except Exception as e:
-            console.print(f"[red]turn failed: {e}[/red]")
+            console.print(f"[red]turn failed: {rich_escape(str(e))}[/red]")
             continue
 
         if text:

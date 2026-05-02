@@ -1008,7 +1008,7 @@ class Agent:
                 # Accumulate incremental delta.content to build full text.
                 current_content += delta.content
                 # Progressive plain-text streaming (safe, no Live redraw issues).
-                self.console.print(delta.content, end="", highlight=False)
+                self.console.print(delta.content, end="", highlight=False, markup=False, emoji=False)
 
             if getattr(delta, "tool_calls", None):
                 for tcd in delta.tool_calls:
