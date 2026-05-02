@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 
 from xli.client import Clients
 from xli.config import GlobalConfig, ProjectConfig
@@ -100,7 +101,7 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
     """
     if is_error:
         first = (content or "").split("\n", 1)[0]
-        return [f"  [red]⎿[/red] [red]{_trunc(first)}[/red]"] if first else []
+        return [f"  [red]⎿[/red] [red]{escape(_trunc(first))}[/red]"] if first else []
 
     text = (content or "").rstrip()
     if not text:
@@ -112,20 +113,20 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
     if name == "read_file":
         n = len(lines)
         first = _strip_line_number_prefix(lines[0])
-        return [f"  [dim]⎿ {n} line{'s' if n != 1 else ''} · {_trunc(first, 80)}[/dim]"]
+        return [f"  [dim]⎿ {n} line{'s' if n != 1 else ''} · {escape(_trunc(first, 80))}[/dim]"]
 
     if name == "list_dir":
         if text == "(empty)":
             return ["  [dim]⎿ (empty)[/dim]"]
         sample = "  ".join(lines[:5])
-        return [f"  [dim]⎿ {len(lines)} entries · {_trunc(sample)}[/dim]"]
+        return [f"  [dim]⎿ {len(lines)} entries · {escape(_trunc(sample))}[/dim]"]
 
     if name == "glob":
         if text == "(no matches)":
             return ["  [dim]⎿ no matches[/dim]"]
         sample = ", ".join(lines[:3])
         return [
-            f"  [dim]⎿ {len(lines)} match{'es' if len(lines) != 1 else ''} · {_trunc(sample)}[/dim]"
+            f"  [dim]⎿ {len(lines)} match{'es' if len(lines) != 1 else ''} · {escape(_trunc(sample))}[/dim]"
         ]
 
     if name == "grep":
@@ -133,7 +134,7 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
             return ["  [dim]⎿ no matches[/dim]"]
         out = [f"  [dim]⎿ {len(lines)} match{'es' if len(lines) != 1 else ''}[/dim]"]
         for ln in lines[:2]:
-            out.append(f"  [dim]   {_trunc(ln)}[/dim]")
+            out.append(f"  [dim]   {escape(_trunc(ln))}[/dim]")
         return out
 
     if name == "bash":
@@ -141,32 +142,32 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
         # of real output. Tests / build commands put the verdict at the end.
         meaningful = [ln for ln in lines if not ln.startswith("--- exit ")]
         if not meaningful:
-            return [f"  [dim]⎿ {_trunc(lines[-1])}[/dim]"]
+            return [f"  [dim]⎿ {escape(_trunc(lines[-1]))}[/dim]"]
         if len(meaningful) <= 3:
-            return [f"  [dim]⎿ {_trunc(ln)}[/dim]" for ln in meaningful]
-        return [f"  [dim]⎿ … {_trunc(meaningful[-3])}[/dim]"] + [
-            f"  [dim]   {_trunc(ln)}[/dim]" for ln in meaningful[-2:]
+            return [f"  [dim]⎿ {escape(_trunc(ln))}[/dim]" for ln in meaningful]
+        return [f"  [dim]⎿ … {escape(_trunc(meaningful[-3]))}[/dim]"] + [
+            f"  [dim]   {escape(_trunc(ln))}[/dim]" for ln in meaningful[-2:]
         ]
 
     if name == "search_project":
         for ln in lines:
             if ln.startswith("[1]"):
-                return [f"  [dim]⎿ {_trunc(ln)}[/dim]"]
+                return [f"  [dim]⎿ {escape(_trunc(ln))}[/dim]"]
         return []
 
     if name in ("web_search", "x_search"):
         for ln in lines:
             s = ln.strip()
             if s and not s.startswith("---"):
-                return [f"  [dim]⎿ {_trunc(s)}[/dim]"]
+                return [f"  [dim]⎿ {escape(_trunc(s))}[/dim]"]
         return []
 
     if name == "code_execute":
         if len(lines) <= 2:
-            return [f"  [dim]⎿ {_trunc(ln)}[/dim]" for ln in lines if ln.strip()]
+            return [f"  [dim]⎿ {escape(_trunc(ln))}[/dim]" for ln in lines if ln.strip()]
         return [
-            f"  [dim]⎿ {_trunc(lines[0])}[/dim]",
-            f"  [dim]   … {_trunc(lines[-1])}[/dim]",
+            f"  [dim]⎿ {escape(_trunc(lines[0]))}[/dim]",
+            f"  [dim]   … {escape(_trunc(lines[-1]))}[/dim]",
         ]
 
     if name == "dispatch_subagent":
@@ -175,12 +176,13 @@ def _format_tool_preview(name: str, content: str, is_error: bool) -> list[str]:
                 continue
             s = ln.strip()
             if s:
-                return [f"  [dim]⎿ {_trunc(s)}[/dim]"]
+                return [f"  [dim]⎿ {escape(_trunc(s))}[/dim]"]
         return []
 
     # write_file, edit_file: tool result text already self-narrates
     # ("wrote foo.py (123 bytes)" / "edited foo.py"), no preview needed.
     return []
+
 
 
 PLAN_MODE_PREAMBLE = """[PLAN MODE ACTIVE]
@@ -1241,7 +1243,7 @@ class Agent:
                             ctx._cache_result(name, args, result_text)
                         except Exception as e:
                             result_text, is_err = f"tool raised: {type(e).__name__}: {e}", True
-                            self.console.print(f"  [red]✗[/red] {name}: {e}")
+                            self.console.print(f"  [red]✗[/red] {name}: {escape(str(e))}")
 
             # Truncate long tool results so one big read_file doesn't poison
             # many future turns with 10k+ tokens.
@@ -1331,4 +1333,4 @@ class Agent:
             preview = args.get("task", "")[:80]
         else:
             preview = ""
-        self.console.print(f"  [dim]→[/dim] [cyan]{name}[/cyan] {preview}")
+        self.console.print(f"  [dim]→[/dim] [cyan]{name}[/cyan] {escape(preview)}")

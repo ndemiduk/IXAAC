@@ -34,7 +34,7 @@ def query(messages: list[dict] | None, question: str, *, scope: str | None = Non
 
     provider = str(sec.get("provider", "")).lower().strip()
     model = sec.get("model") or (
-        "claude-3-5-sonnet-20241022" if provider == "anthropic" else "gpt-4o-mini"
+        "claude-sonnet-4-6" if provider == "anthropic" else "gpt-4o-mini"
     )
     api_key_env = sec.get("api_key_env")
     if not api_key_env:
