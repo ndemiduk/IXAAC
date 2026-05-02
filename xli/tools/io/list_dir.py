@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .context import ToolContext, ToolResult
+from ..context import ToolContext, ToolResult
 
 
 def _resolve_in_project(ctx: ToolContext, relpath: str) -> Path:

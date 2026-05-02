@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _is_ignored, _resolve_in_project, _truncate
+from ..context import ToolContext, ToolResult
+from ..helpers import _is_ignored, _resolve_in_project, _truncate
 
 
 def t_read_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

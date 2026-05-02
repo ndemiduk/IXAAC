@@ -1,12 +1,12 @@
-"""edit_file tool (with fuzzy whitespace fallback) — ported to tools_new."""
+"""edit_file tool (with fuzzy whitespace fallback)."""
 
 from __future__ import annotations
 
 import re
 from typing import Any, Optional
 
-from .context import ToolContext, ToolResult
-from .helpers import _resolve_in_project, _mark_dirty
+from ..context import ToolContext, ToolResult
+from ..helpers import _resolve_in_project, _mark_dirty
 
 
 def _normalize_indent(text: str, start: int, new: str) -> str:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _truncate
+from ..context import ToolContext, ToolResult
+from ..helpers import _truncate
 
 
 def t_code_execute(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

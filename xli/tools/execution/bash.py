@@ -4,8 +4,8 @@ import re
 import subprocess
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _truncate
+from ..context import ToolContext, ToolResult
+from ..helpers import _truncate
 
 VALID_INTENTS = {"read-only", "modifies-system", "network", "modifies-project"}
 INTENT_READ_ONLY = "read-only"

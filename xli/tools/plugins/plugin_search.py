@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .context import ToolContext, ToolResult
+from ..context import ToolContext, ToolResult
 
 
 def t_plugin_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

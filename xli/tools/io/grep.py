@@ -6,8 +6,8 @@ import fnmatch
 import re
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _is_ignored, _truncate
+from ..context import ToolContext, ToolResult
+from ..helpers import _is_ignored, _truncate
 
 
 def t_grep(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

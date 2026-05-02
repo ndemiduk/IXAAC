@@ -1,11 +1,11 @@
-"""write_file tool — ported to tools_new."""
+"""write_file tool (new implementation)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _resolve_in_project, _mark_dirty
+from ..context import ToolContext, ToolResult
+from ..helpers import _resolve_in_project, _mark_dirty
 
 
 def t_write_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

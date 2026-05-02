@@ -5,8 +5,8 @@ from __future__ import annotations
 import fnmatch
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _is_ignored, _truncate
+from ..context import ToolContext, ToolResult
+from ..helpers import _is_ignored, _truncate
 
 
 def t_glob(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

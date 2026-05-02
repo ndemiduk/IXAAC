@@ -1,6 +1,6 @@
 """
 summarize_file tool — structural summary using AST for Python files.
-Ported to tools_new; uses shared helpers for safety/ignore/truncate.
+Ported to the new tools/ implementation.
 """
 
 from __future__ import annotations
@@ -8,8 +8,8 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from .context import ToolContext, ToolResult
-from .helpers import _truncate, _resolve_in_project, _is_ignored
+from ..context import ToolContext, ToolResult
+from ..helpers import _truncate, _resolve_in_project, _is_ignored
 
 
 def t_summarize_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
