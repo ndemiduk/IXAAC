@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Optional
 
@@ -191,8 +192,21 @@ class Plugin:
         return self.path.exists()
 
     def read_raw(self) -> str:
-        return self.path.read_text()
+        """Read the .md file. Returns empty string on missing or unreadable file
+        (callers should prefer .exists() first for strict checks)."""
+        return self._raw
 
+    @cached_property
+    def _raw(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8")
+        except (FileNotFoundError, PermissionError, OSError):
+            return ""
+        except Exception:
+            # Unexpected encoding or other I/O error — degrade gracefully
+            return ""
+
+    @cached_property
     def parsed(self) -> tuple[dict, str]:
         return parse_frontmatter(self.read_raw())
 
