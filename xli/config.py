@@ -108,6 +108,7 @@ class GlobalConfig:
     max_parallel_workers: int = 8
     pricing: dict = field(default_factory=dict)          # model -> {input_per_million, output_per_million}
     models_detected_at: Optional[str] = None             # ISO ts; set by `xli setup` auto-detection
+    secondary_ai: dict = field(default_factory=dict)     # {"provider": "anthropic"|"openai", "model": str, "api_key_env": str} — opt-in only, empty = off
 
     def orchestrator(self) -> str:
         """Model used by the main agent. Falls back to `model`."""

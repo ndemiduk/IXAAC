@@ -10,6 +10,7 @@ from __future__ import annotations
 from rich.console import Console
 
 from xli.persona import Persona, is_valid_name, list_personas
+import shlex
 
 from .attachments import save_attached_docs, save_attached_refs
 
@@ -352,3 +353,86 @@ def _handle_doc_command(user_input: str, agent, project) -> bool:
         return True
 
     return False
+
+
+def _handle_2ndeye_command(user_input: str, agent, project) -> bool:
+    """Handle `/2ndeye` slash command (MVP phases 1-3).
+
+    Bundles (scoped) conversation history + question, forwards to secondary_ai.query.
+    Attribution header added here; response is plain text from provider.
+    /2ndeye is slash-only, never on agent tool palette.
+    """
+    if not user_input.startswith("/2ndeye"):
+        return False
+
+    # Parse: /2ndeye [--last N] [--since <mark>] <question>
+    try:
+        parts = shlex.split(user_input)
+    except ValueError:
+        parts = user_input.split()
+
+    if len(parts) < 2 or parts[0] != "/2ndeye":
+        return False
+
+    last_n = None
+    since_mark = None
+    q_parts: list[str] = []
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        if tok == "--last" and i + 1 < len(parts):
+            try:
+                last_n = int(parts[i + 1])
+                i += 2
+                continue
+            except ValueError:
+                pass
+        elif tok.startswith("--last="):
+            try:
+                last_n = int(tok.split("=", 1)[1])
+                i += 1
+                continue
+            except ValueError:
+                pass
+        elif tok == "--since" and i + 1 < len(parts):
+            since_mark = parts[i + 1]
+            i += 2
+            continue
+        else:
+            q_parts.append(tok)
+            i += 1
+
+    question = " ".join(q_parts).strip()
+    if not question:
+        console.print(
+            "[dim]usage: /2ndeye [--last N] [--since <mark>] <question>[/dim]\n"
+            "[dim]  (configure secondary_ai in ~/.config/xli/config.json first)[/dim]"
+        )
+        return True
+
+    # Pull history from agent (in-memory turns; survives condensation per debug.py pattern)
+    history = getattr(agent, "history", []) or []
+    if last_n is not None and last_n > 0:
+        # last N user+assistant pairs (rough; messages list)
+        history = history[-last_n * 2 :]
+    if since_mark:
+        console.print("[yellow]--since support deferred to later phase; using current history slice[/yellow]")
+
+    # Call secondary (errors only on config/env/API boundary)
+    try:
+        from xli.secondary_ai import query
+        response = query(history, question, scope=f"--last {last_n}" if last_n else None)
+    except Exception as exc:
+        # Boundary errors from query are user-actionable; surface cleanly
+        console.print(f"[red]2ndeye: {exc}[/red]")
+        return True
+
+    # Attribution header + response (per spec)
+    cfg = __import__("xli.config", fromlist=["GlobalConfig"]).GlobalConfig.load()
+    sec = getattr(cfg, "secondary_ai", {}) or {}
+    model = sec.get("model", "secondary")
+    header = f"[2ndeye · {model}]"
+    console.print(f"\n{header}")
+    console.print(response)
+    console.print()
+    return True

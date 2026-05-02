@@ -65,6 +65,7 @@ from .slash_commands import (
     _handle_doc_command,
     _handle_lib_command,
     _handle_ref_command,
+    _handle_2ndeye_command,
 )
 from .status import print_pricing
 
@@ -550,6 +551,8 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             continue
         if _handle_debug_command(user_input, agent, project):
             continue
+        if _handle_2ndeye_command(user_input, agent, project):
+            continue
         if user_input.startswith("/get "):
             intent = user_input[len("/get "):].strip()
             if intent:
@@ -784,6 +787,8 @@ def cmd_code(args: argparse.Namespace) -> int:
         if _handle_lib_command(user_input, project):
             continue
         if _handle_debug_command(user_input, agent, project):
+            continue
+        if _handle_2ndeye_command(user_input, agent, project):
             continue
         if user_input.startswith("/get "):
             intent = user_input[len("/get "):].strip()
