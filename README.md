@@ -44,9 +44,10 @@ The space iXaac is trying to occupy:
 - Closer to a substrate than an app. You build up your own personas, docs,
   and plugins; the system grows with what you curate. Empty out of the box,
   more useful the more you invest.
-- Multi-vendor by design. Grok is the default, but the architecture
-  treats Claude / OpenAI / Gemini as plugins or hand-off targets rather
-  than rebuilding around any single vendor's loop.
+- xAI / Grok-first today. The plugin architecture is designed so other
+  vendors (Claude, OpenAI, Gemini) can show up later as opt-in seams
+  rather than requiring a rebuild — but those integrations haven't been
+  written yet. Currently it's a Grok-centric system.
 - Local-first in the places that matter. Files on disk are the source of
   truth, secrets stay in a local vault, the XMPP fabric runs on your own
   tailnet.
