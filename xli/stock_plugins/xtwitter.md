@@ -4,9 +4,54 @@ name: X (Twitter v2 API)
 description: Tweet search, trends, user/timeline lookups via the X v2 API. Requires a paid tier.
 categories: [social, news]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: bearer
 auth_env_vars:
   - X_BEARER_TOKEN
+actions:
+  - id: recent_search
+    description: Search tweets from the last 7 days
+    method: GET
+    url: https://api.twitter.com/2/tweets/search/recent
+    params:
+      query: {required: true, description: "Search query (supports from:, to:, lang:, -is:retweet, has:images)"}
+      max_results: {default: "25"}
+      tweet.fields: {default: "created_at,public_metrics,author_id"}
+    headers:
+      Authorization: "Bearer ${X_BEARER_TOKEN}"
+    response_shape: ".data[] → {id, text, created_at, public_metrics, author_id}"
+  - id: user_by_handle
+    description: Look up an X user by handle
+    method: GET
+    url: https://api.twitter.com/2/users/by/username/{username}
+    params:
+      username: {required: true, description: "X handle (without @)"}
+      user.fields: {default: "created_at,public_metrics,verified,description"}
+    headers:
+      Authorization: "Bearer ${X_BEARER_TOKEN}"
+    response_shape: ".data → {id, name, username, description, public_metrics}"
+  - id: user_tweets
+    description: Recent tweets from a user (need their numeric user ID)
+    method: GET
+    url: https://api.twitter.com/2/users/{user_id}/tweets
+    params:
+      user_id: {required: true, description: "Numeric user ID (from user_by_handle)"}
+      max_results: {default: "25"}
+      tweet.fields: {default: "created_at,public_metrics"}
+    headers:
+      Authorization: "Bearer ${X_BEARER_TOKEN}"
+  - id: get_tweet
+    description: Get a single tweet by ID
+    method: GET
+    url: https://api.twitter.com/2/tweets/{tweet_id}
+    params:
+      tweet_id: {required: true, description: "Tweet ID"}
+      tweet.fields: {default: "created_at,public_metrics,author_id"}
+      expansions: {default: "author_id"}
+      user.fields: {default: "username"}
+    headers:
+      Authorization: "Bearer ${X_BEARER_TOKEN}"
 ---
 
 # X (Twitter v2 API)

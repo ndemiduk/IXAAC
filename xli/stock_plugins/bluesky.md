@@ -4,8 +4,45 @@ name: Bluesky (atproto)
 description: Search posts, look up profiles, browse popular feeds — public reads, no authentication
 categories: [social, news]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: search_posts
+    description: Search Bluesky posts by query
+    method: GET
+    url: https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts
+    params:
+      q: {required: true, description: "Search query"}
+      limit: {default: "25"}
+    response_shape: ".posts[] → {author, text, indexedAt, likeCount, repostCount}"
+  - id: get_profile
+    description: Look up a Bluesky profile by handle
+    method: GET
+    url: https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile
+    params:
+      actor: {required: true, description: "Handle (e.g. name.bsky.social) or DID"}
+    response_shape: "{handle, displayName, description, followersCount, followsCount, postsCount}"
+  - id: author_feed
+    description: Recent posts from a specific author
+    method: GET
+    url: https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed
+    params:
+      actor: {required: true, description: "Handle or DID"}
+      limit: {default: "25"}
+  - id: search_profiles
+    description: Search Bluesky profiles by name or handle
+    method: GET
+    url: https://public.api.bsky.app/xrpc/app.bsky.actor.searchActors
+    params:
+      q: {required: true, description: "Search query"}
+      limit: {default: "25"}
+  - id: popular_feeds
+    description: Browse popular custom feed generators
+    method: GET
+    url: https://public.api.bsky.app/xrpc/app.bsky.unspecced.getPopularFeedGenerators
+    params: {}
 ---
 
 # Bluesky (atproto)

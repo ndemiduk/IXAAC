@@ -4,9 +4,48 @@ name: CourtListener
 description: US federal and state court opinions, dockets, judges, and oral arguments (Free Law Project)
 categories: [legal, research]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: token
 auth_env_vars:
   - COURTLISTENER_TOKEN
+actions:
+  - id: search_opinions
+    description: Search US court opinions by query, optionally filtered by court and date
+    method: GET
+    url: https://www.courtlistener.com/api/rest/v3/search/
+    params:
+      q: {required: true, description: "Search query"}
+      type: {const: "o"}
+      court: {description: "Court code (scotus, ca1-ca11, cadc, cafc, nysd, cand, etc.)"}
+      filed_after: {description: "Date filter YYYY-MM-DD"}
+      filed_before: {description: "Date filter YYYY-MM-DD"}
+    headers:
+      Authorization: "Token ${COURTLISTENER_TOKEN}"
+    response_shape: ".results[] → {id, caseName, court, dateFiled, citation, snippet}"
+  - id: get_opinion
+    description: Get full text of a specific court opinion by ID
+    method: GET
+    url: https://www.courtlistener.com/api/rest/v3/opinions/{opinion_id}/
+    params:
+      opinion_id: {required: true, description: "Opinion ID from search results"}
+    response_shape: "{id, plain_text, html, date_created, cluster}"
+  - id: search_dockets
+    description: Search case dockets (case-level metadata)
+    method: GET
+    url: https://www.courtlistener.com/api/rest/v3/search/
+    params:
+      q: {required: true, description: "Search query"}
+      type: {const: "r"}
+    headers:
+      Authorization: "Token ${COURTLISTENER_TOKEN}"
+  - id: search_judges
+    description: Look up a judge by name
+    method: GET
+    url: https://www.courtlistener.com/api/rest/v3/people/
+    params:
+      name_first: {description: "First name"}
+      name_last: {description: "Last name"}
 ---
 
 # CourtListener

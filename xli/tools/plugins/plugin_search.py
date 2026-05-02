@@ -37,11 +37,27 @@ def t_plugin_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "Suggest: install/subscribe a plugin that fits, or fall back to "
             "web_search/bash. Do NOT fabricate plugin output."
         )
-    out = ["Top matches (call plugin_get for full content of any candidate):"]
+    out = ["Top matches (use plugin_call for structured actions, or plugin_get for full docs):"]
     for p, score in matches:
         cats = ", ".join(p.categories()) or "—"
-        out.append(
-            f"- [{p.id}] (score={score:.1f}, risk={p.risk()}, categories={cats})\n"
-            f"    {p.name()}: {p.description() or '(no description)'}"
-        )
+        manifest = p.manifest()
+        if manifest:
+            effect = manifest.effect
+            out.append(
+                f"- [{p.id}] (score={score:.1f}, effect={effect}, categories={cats})\n"
+                f"    {p.name()}: {p.description() or '(no description)'}\n"
+                f"    actions:"
+            )
+            for a in manifest.actions:
+                user_params = [
+                    name for name, spec in a.params.items()
+                    if spec.const is None
+                ]
+                param_str = ", ".join(user_params) if user_params else "(none)"
+                out.append(f"      {a.id}({param_str}) — {a.description}")
+        else:
+            out.append(
+                f"- [{p.id}] (score={score:.1f}, risk={p.risk()}, categories={cats}) [legacy — use plugin_get + bash]\n"
+                f"    {p.name()}: {p.description() or '(no description)'}"
+            )
     return ToolResult("\n".join(out))

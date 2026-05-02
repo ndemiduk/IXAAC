@@ -4,8 +4,47 @@ name: Google News (RSS)
 description: Topic, region, and search-driven headlines via Google News' public RSS endpoint
 categories: [news, headlines]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: search
+    description: Search Google News headlines by query
+    method: GET
+    url: https://news.google.com/rss/search
+    params:
+      q: {required: true, description: "Search query (supports when:7d, site:, quoted phrases)"}
+      hl: {default: "en-US", description: "UI language"}
+      gl: {default: "US", description: "Country code"}
+      ceid: {default: "US:en", description: "Country:language edition"}
+    response_shape: "RSS XML → item[] → {title, link, pubDate, source, description}"
+  - id: top_headlines
+    description: Top headlines (no query, general front page)
+    method: GET
+    url: https://news.google.com/rss
+    params:
+      hl: {default: "en-US"}
+      gl: {default: "US"}
+      ceid: {default: "US:en"}
+  - id: topic
+    description: Headlines for a specific topic section
+    method: GET
+    url: https://news.google.com/rss/headlines/section/topic/{topic}
+    params:
+      topic: {required: true, enum: ["WORLD", "NATION", "BUSINESS", "TECHNOLOGY", "ENTERTAINMENT", "SCIENCE", "SPORTS", "HEALTH"]}
+      hl: {default: "en-US"}
+      gl: {default: "US"}
+      ceid: {default: "US:en"}
+  - id: geo
+    description: Headlines for a geographic location
+    method: GET
+    url: https://news.google.com/rss/headlines/section/geo/{location}
+    params:
+      location: {required: true, description: "City or region name (e.g. Chicago, London)"}
+      hl: {default: "en-US"}
+      gl: {default: "US"}
+      ceid: {default: "US:en"}
 ---
 
 # Google News (RSS)

@@ -4,8 +4,52 @@ name: Wikipedia
 description: Article search and summary lookup via the Wikipedia REST and Action APIs
 categories: [reference, facts]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: title_search
+    description: Autocomplete-style search for Wikipedia article titles
+    method: GET
+    url: https://en.wikipedia.org/w/api.php
+    params:
+      action: {const: "opensearch"}
+      search: {required: true, description: "Search query"}
+      limit: {default: "10"}
+      format: {const: "json"}
+    response_shape: "[query, [titles], [descriptions], [urls]]"
+  - id: fulltext_search
+    description: Full-text search across Wikipedia articles
+    method: GET
+    url: https://en.wikipedia.org/w/api.php
+    params:
+      action: {const: "query"}
+      list: {const: "search"}
+      srsearch: {required: true, description: "Search query"}
+      format: {const: "json"}
+      srlimit: {default: "10"}
+    response_shape: ".query.search[] → {title, snippet, timestamp, wordcount}"
+  - id: page_summary
+    description: Clean 3–4 sentence summary of a Wikipedia article
+    method: GET
+    url: https://en.wikipedia.org/api/rest_v1/page/summary/{title}
+    params:
+      title: {required: true, description: "Article title (underscores OK, e.g. Albert_Einstein)"}
+    response_shape: "{title, extract, description, thumbnail}"
+  - id: page_intro
+    description: Plain-text intro section of a Wikipedia article (longer than summary)
+    method: GET
+    url: https://en.wikipedia.org/w/api.php
+    params:
+      action: {const: "query"}
+      prop: {const: "extracts"}
+      exintro: {const: "1"}
+      explaintext: {const: "1"}
+      titles: {required: true, description: "Article title"}
+      format: {const: "json"}
+      redirects: {const: "1"}
+    response_shape: ".query.pages[id].extract → plain text"
 ---
 
 # Wikipedia

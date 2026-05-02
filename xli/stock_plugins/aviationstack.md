@@ -4,9 +4,52 @@ name: AviationStack
 description: Flight status, schedules, airport and airline metadata — by flight number, route, or IATA code
 categories: [travel, flights]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: query_param
 auth_env_vars:
   - AVIATIONSTACK_KEY
+actions:
+  - id: flight_by_number
+    description: Look up flight status by IATA flight number
+    method: GET
+    url: http://api.aviationstack.com/v1/flights
+    params:
+      access_key: {const: "${AVIATIONSTACK_KEY}"}
+      flight_iata: {required: true, description: "IATA flight number (e.g. BA286, UA123)"}
+    response_shape: ".data[] → {flight_status, departure, arrival, airline, flight, aircraft, live}"
+  - id: flight_by_route
+    description: Look up flights between two airports
+    method: GET
+    url: http://api.aviationstack.com/v1/flights
+    params:
+      access_key: {const: "${AVIATIONSTACK_KEY}"}
+      dep_iata: {required: true, description: "Departure airport IATA code (e.g. SFO)"}
+      arr_iata: {required: true, description: "Arrival airport IATA code (e.g. JFK)"}
+    response_shape: ".data[] → {flight_status, departure, arrival, airline, flight}"
+  - id: flight_by_airline
+    description: Look up flights by airline and optional date
+    method: GET
+    url: http://api.aviationstack.com/v1/flights
+    params:
+      access_key: {const: "${AVIATIONSTACK_KEY}"}
+      airline_iata: {required: true, description: "Airline IATA code (e.g. UA, BA)"}
+      flight_date: {description: "Date filter YYYY-MM-DD"}
+  - id: airport_info
+    description: Airport metadata by IATA code
+    method: GET
+    url: http://api.aviationstack.com/v1/airports
+    params:
+      access_key: {const: "${AVIATIONSTACK_KEY}"}
+      iata_code: {required: true, description: "Airport IATA code (e.g. SFO, LHR)"}
+    response_shape: ".data[] → {airport_name, iata_code, latitude, longitude, country_name, timezone}"
+  - id: airline_info
+    description: Airline metadata by IATA code
+    method: GET
+    url: http://api.aviationstack.com/v1/airlines
+    params:
+      access_key: {const: "${AVIATIONSTACK_KEY}"}
+      iata_code: {required: true, description: "Airline IATA code (e.g. UA, BA, JL)"}
 ---
 
 # AviationStack

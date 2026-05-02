@@ -4,8 +4,51 @@ name: CoinGecko
 description: Cryptocurrency prices, market data, history, and exchange info — no API key needed
 categories: [finance, crypto]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: price
+    description: Quick price lookup for one or more coins in one or more currencies
+    method: GET
+    url: https://api.coingecko.com/api/v3/simple/price
+    params:
+      ids: {required: true, description: "Comma-separated CoinGecko slugs (bitcoin, ethereum, solana)"}
+      vs_currencies: {default: "usd", description: "Comma-separated currency codes (usd, eur, btc)"}
+    response_shape: "{coin_id: {currency: number}}"
+  - id: search
+    description: Search coins by ticker or name to find the canonical CoinGecko id
+    method: GET
+    url: https://api.coingecko.com/api/v3/search
+    params:
+      query: {required: true, description: "Ticker or coin name"}
+    response_shape: ".coins[] → {id, name, symbol, market_cap_rank}"
+  - id: coin_detail
+    description: Detailed info for a coin — description, links, market data
+    method: GET
+    url: https://api.coingecko.com/api/v3/coins/{coin_id}
+    params:
+      coin_id: {required: true, description: "CoinGecko slug (e.g. bitcoin)"}
+  - id: market_chart
+    description: Historical price/volume over last N days
+    method: GET
+    url: https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart
+    params:
+      coin_id: {required: true, description: "CoinGecko slug"}
+      vs_currency: {default: "usd"}
+      days: {required: true, description: "Number of days (1, 7, 30, 90, 365, max)"}
+    response_shape: ".prices[] → [unix_ms, value]; .market_caps[]; .total_volumes[]"
+  - id: trending
+    description: Top trending coin searches in the last 24 hours
+    method: GET
+    url: https://api.coingecko.com/api/v3/search/trending
+    params: {}
+  - id: global
+    description: Global crypto market summary — total market cap, BTC dominance
+    method: GET
+    url: https://api.coingecko.com/api/v3/global
+    params: {}
 ---
 
 # CoinGecko

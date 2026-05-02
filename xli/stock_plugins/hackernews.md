@@ -4,8 +4,41 @@ name: Hacker News (Algolia)
 description: Full-text search over Hacker News stories and comments via the Algolia HN API
 categories: [tech, news, search]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: search
+    description: Search HN stories by relevance
+    method: GET
+    url: https://hn.algolia.com/api/v1/search
+    params:
+      query: {required: true, description: "Search query"}
+      tags: {default: "story", description: "Filter tags: story, comment, show_hn, ask_hn, front_page"}
+      numericFilters: {description: "e.g. points>50, num_comments>10"}
+    response_shape: ".hits[] → {objectID, title, url, author, points, num_comments, created_at_i}"
+  - id: search_by_date
+    description: Search HN stories/comments sorted by date (most recent first)
+    method: GET
+    url: https://hn.algolia.com/api/v1/search_by_date
+    params:
+      query: {required: true, description: "Search query"}
+      tags: {default: "story"}
+    response_shape: ".hits[] → {objectID, title, url, author, points, num_comments, created_at_i}"
+  - id: front_page
+    description: Current HN front page stories
+    method: GET
+    url: https://hn.algolia.com/api/v1/search
+    params:
+      tags: {const: "front_page"}
+    response_shape: ".hits[] → {objectID, title, url, author, points, num_comments}"
+  - id: get_item
+    description: Get a specific HN item (story or comment) by ID
+    method: GET
+    url: https://hn.algolia.com/api/v1/items/{item_id}
+    params:
+      item_id: {required: true, description: "HN item ID (numeric)"}
 ---
 
 # Hacker News (Algolia)

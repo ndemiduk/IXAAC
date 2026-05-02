@@ -458,7 +458,7 @@ class WorkerAgent:
         if not self.subscribed_plugins:
             schemas = [
                 s for s in schemas
-                if s["function"]["name"] not in {"plugin_search", "plugin_get"}
+                if s["function"]["name"] not in {"plugin_search", "plugin_get", "plugin_call"}
             ]
 
         model = self.cfg.get_model_for_role("worker")
@@ -772,7 +772,7 @@ class Agent:
         if not _load_subs(self.project.xli_dir):
             schemas = [
                 s for s in schemas
-                if s["function"]["name"] not in {"plugin_search", "plugin_get"}
+                if s["function"]["name"] not in {"plugin_search", "plugin_get", "plugin_call"}
             ]
 
         self.history.append({"role": "user", "content": user_message})

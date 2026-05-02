@@ -4,8 +4,40 @@ name: Open-Meteo
 description: Free weather forecasts and current conditions, no API key required
 categories: [weather]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: geocode
+    description: Look up latitude/longitude for a city name
+    method: GET
+    url: https://geocoding-api.open-meteo.com/v1/search
+    params:
+      name: {required: true, description: "City name (URL-encoded), e.g. 'Seattle' or 'Tokyo'"}
+      count: {default: "1", description: "Number of results to return"}
+    response_shape: ".results[] → {latitude, longitude, country, timezone}"
+  - id: current_weather
+    description: Current weather + hourly forecast for a location
+    method: GET
+    url: https://api.open-meteo.com/v1/forecast
+    params:
+      latitude: {required: true, description: "Decimal degrees, negative = south"}
+      longitude: {required: true, description: "Decimal degrees, negative = west"}
+      current_weather: {const: "true"}
+      hourly: {default: "temperature_2m,precipitation_probability,wind_speed_10m"}
+      timezone: {default: "auto"}
+    response_shape: ".current_weather → {temperature, windspeed, weathercode}; .hourly → parallel arrays"
+  - id: daily_forecast
+    description: Daily forecast (next 7 days) for a location
+    method: GET
+    url: https://api.open-meteo.com/v1/forecast
+    params:
+      latitude: {required: true, description: "Decimal degrees, negative = south"}
+      longitude: {required: true, description: "Decimal degrees, negative = west"}
+      daily: {default: "temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max"}
+      timezone: {default: "auto"}
+    response_shape: ".daily → parallel arrays of date, temp_max, temp_min, precip, wind"
 ---
 
 # Open-Meteo

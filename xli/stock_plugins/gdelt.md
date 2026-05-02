@@ -4,8 +4,41 @@ name: GDELT 2.0
 description: Global news/event database — query worldwide article coverage and trends over time
 categories: [news, trends, research]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: none
 auth_env_vars: []
+actions:
+  - id: search_articles
+    description: Search global news articles matching a query
+    method: GET
+    url: https://api.gdeltproject.org/api/v2/doc/doc
+    params:
+      query: {required: true, description: "Search query — supports phrases, boolean, sourcecountry:XX filters"}
+      mode: {const: "ArtList"}
+      maxrecords: {default: "25"}
+      format: {const: "json"}
+      timespan: {default: "24h", description: "Time window: 1h, 4h, 12h, 24h, 3d, 1w, 1month, etc."}
+    response_shape: ".articles[] → {url, title, seendate, sourcecountry, language, domain}"
+  - id: coverage_volume
+    description: Article coverage volume over time (is this story growing or fading?)
+    method: GET
+    url: https://api.gdeltproject.org/api/v2/doc/doc
+    params:
+      query: {required: true, description: "Search query"}
+      mode: {const: "TimelineVol"}
+      format: {const: "json"}
+      timespan: {default: "1month"}
+    response_shape: ".timeline[] → time-bucketed article counts"
+  - id: tone_over_time
+    description: Average article sentiment/tone over time (–10 very negative, +10 very positive)
+    method: GET
+    url: https://api.gdeltproject.org/api/v2/doc/doc
+    params:
+      query: {required: true, description: "Search query"}
+      mode: {const: "TimelineTone"}
+      format: {const: "json"}
+      timespan: {default: "1month"}
 ---
 
 # GDELT 2.0

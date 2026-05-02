@@ -12,6 +12,7 @@ PARALLEL_SAFE: set[str] = {
     "code_execute",
     "plugin_search",
     "plugin_get",
+    "plugin_call",
     "dispatch_subagent",
     "summarize_file",
 }
@@ -297,6 +298,35 @@ def tool_schemas() -> list[dict]:
                         "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
                     },
                     "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plugin_call",
+                "description": (
+                    "Invoke a structured plugin action directly — no curl needed. "
+                    "Only works for plugins with an actions manifest. Falls back to "
+                    "plugin_get + bash for legacy plugins without actions."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plugin": {
+                            "type": "string",
+                            "description": "Plugin id (e.g. 'open-meteo').",
+                        },
+                        "action": {
+                            "type": "string",
+                            "description": "Action id (e.g. 'current_weather').",
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Action parameters as key-value pairs.",
+                        },
+                    },
+                    "required": ["plugin", "action", "params"],
                 },
             },
         },

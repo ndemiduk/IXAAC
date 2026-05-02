@@ -4,9 +4,77 @@ name: Alpha Vantage
 description: Stock quotes, time-series, fundamentals, FX, crypto, and technical indicators
 categories: [finance, stocks]
 risk: low
+effect: read-only
+trust: subscription
 auth_type: query_param
 auth_env_vars:
   - ALPHA_VANTAGE_KEY
+actions:
+  - id: quote
+    description: Latest quote for a stock symbol
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {const: "GLOBAL_QUOTE"}
+      symbol: {required: true, description: "Ticker symbol (e.g. AAPL, MSFT, .LON suffix for non-US)"}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
+    response_shape: ".['Global Quote'] → {symbol, open, high, low, price, volume, change, change_percent}"
+  - id: daily_series
+    description: Daily OHLCV time series for a stock
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {const: "TIME_SERIES_DAILY"}
+      symbol: {required: true, description: "Ticker symbol"}
+      outputsize: {default: "compact", enum: ["compact", "full"], description: "compact=100 days, full=20+ years"}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
+    response_shape: ".['Time Series (Daily)'] → {date: {open, high, low, close, volume}}"
+  - id: intraday
+    description: Intraday bars (1/5/15/30/60 min) for a stock
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {const: "TIME_SERIES_INTRADAY"}
+      symbol: {required: true, description: "Ticker symbol"}
+      interval: {required: true, enum: ["1min", "5min", "15min", "30min", "60min"]}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
+  - id: symbol_search
+    description: Search for a stock symbol by keyword
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {const: "SYMBOL_SEARCH"}
+      keywords: {required: true, description: "Search keywords (company name, partial ticker)"}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
+    response_shape: ".bestMatches[] → {symbol, name, type, region, currency}"
+  - id: company_overview
+    description: Fundamentals — PE, market cap, EPS, dividend yield, sector
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {const: "OVERVIEW"}
+      symbol: {required: true, description: "Ticker symbol"}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
+  - id: fx_rate
+    description: Real-time FX exchange rate between two currencies
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {const: "CURRENCY_EXCHANGE_RATE"}
+      from_currency: {required: true, description: "Source currency code (USD, EUR, BTC, etc.)"}
+      to_currency: {required: true, description: "Target currency code"}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
+  - id: technical_indicator
+    description: Technical indicator (RSI, SMA, EMA, MACD, BBANDS, etc.)
+    method: GET
+    url: https://www.alphavantage.co/query
+    params:
+      function: {required: true, description: "Indicator name: RSI, SMA, EMA, MACD, BBANDS, ADX, STOCH, etc."}
+      symbol: {required: true, description: "Ticker symbol"}
+      interval: {default: "daily", enum: ["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"]}
+      time_period: {default: "14", description: "Number of data points for the indicator"}
+      series_type: {default: "close", enum: ["close", "open", "high", "low"]}
+      apikey: {const: "${ALPHA_VANTAGE_KEY}"}
 ---
 
 # Alpha Vantage

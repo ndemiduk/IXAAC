@@ -32,6 +32,7 @@ from .execution.bash import t_bash
 # Plugin tools
 from .plugins.plugin_search import t_plugin_search
 from .plugins.plugin_get import t_plugin_get
+from .plugins.plugin_call import t_plugin_call
 
 # Bare-name aliases (so `from xli.tools import list_dir` and `tools.list_dir(...)` work
 # and the functions shadow any submodule names to avoid package shadowing issues).
@@ -47,6 +48,7 @@ x_search = t_x_search
 code_execute = t_code_execute
 plugin_search = t_plugin_search
 plugin_get = t_plugin_get
+plugin_call = t_plugin_call
 bash = t_bash
 write_file = t_write_file
 edit_file = t_edit_file
@@ -80,6 +82,7 @@ REGISTRY = {
     "code_execute": t_code_execute,
     "plugin_search": t_plugin_search,
     "plugin_get": t_plugin_get,
+    "plugin_call": t_plugin_call,
     "plan_note": t_plan_note,
     "read_plan_notes": t_read_plan_notes,
 }

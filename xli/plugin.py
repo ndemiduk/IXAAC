@@ -197,7 +197,35 @@ class Plugin:
         return parse_frontmatter(self.read_raw())
 
     def metadata(self) -> dict:
+        """Parse frontmatter metadata. Uses YAML for plugins with actions:
+        blocks (the simple parser can't handle nested dicts), falls back
+        to the lightweight parser otherwise."""
+        raw = self.read_raw()
+        lines = raw.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                end = i
+                break
+        if end is None:
+            return {}
+        fm_text = "\n".join(lines[1:end])
+        # If there's an actions: block, use YAML for correct nested parsing.
+        if "\nactions:" in fm_text or fm_text.startswith("actions:"):
+            try:
+                import yaml
+                meta = yaml.safe_load(fm_text)
+                return meta if isinstance(meta, dict) else {}
+            except Exception:
+                pass
         return self.parsed()[0]
+
+    def manifest(self):
+        """Structured action manifest, or None for legacy plugins."""
+        from xli.plugin_manifest import parse_manifest
+        return parse_manifest(self.read_raw())
 
     def body(self) -> str:
         return self.parsed()[1]
@@ -434,8 +462,17 @@ def search_plugins(intent: str, plugins: list[Plugin], limit: int = 5) -> list[t
             (meta.get("description") or "").lower(),
             " ".join(meta.get("categories") or []).lower(),
         ]
-        haystack = " ".join(haystack_parts)
-        if not haystack:
+        # Include action descriptions in the haystack so intent keywords
+        # like "geocode" or "trending" match even if the plugin-level
+        # description doesn't mention them.
+        action_text = ""
+        manifest = p.manifest()
+        if manifest:
+            action_text = " ".join(
+                f"{a.id} {a.description}" for a in manifest.actions
+            ).lower()
+        haystack = " ".join(haystack_parts) + " " + action_text
+        if not haystack.strip():
             continue
         # Score: count of tokens that appear, weighted by where they hit.
         score = 0.0
@@ -448,6 +485,8 @@ def search_plugins(intent: str, plugins: list[Plugin], limit: int = 5) -> list[t
                 score += 2.0
             elif tok in haystack_parts[2]:  # description match
                 score += 1.0
+            elif tok in action_text:       # action-level match
+                score += 1.5
         if score > 0:
             scored.append((p, score))
     scored.sort(key=lambda pair: pair[1], reverse=True)
