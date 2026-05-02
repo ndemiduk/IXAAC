@@ -433,10 +433,16 @@ class WorkerAgent:
     # Inherits parent's plugin subscriptions so workers can plugin_search too.
     subscribed_plugins: list[str] = field(default_factory=list)
 
-    def run(self, task: str, context: Optional[str] = None) -> tuple[str, CallStats]:
+    def run(
+        self,
+        task: str,
+        context: Optional[str] = None,
+        system_prompt_override: Optional[str] = None,
+    ) -> tuple[str, CallStats]:
         call = CallStats()
+        sys_prompt = system_prompt_override if system_prompt_override else WORKER_SYSTEM_PROMPT
         history: list[dict[str, Any]] = [
-            {"role": "system", "content": WORKER_SYSTEM_PROMPT}
+            {"role": "system", "content": sys_prompt}
         ]
         user_msg = f"Task:\n{task}"
         if context:
@@ -556,6 +562,11 @@ class Agent:
     # Set in __post_init__ — the system prompt before any /doc attachments.
     # Kept separate so _effective_system_prompt can rebuild fresh each turn.
     base_system_prompt: str = ""
+    # The most recent user message handed to run_turn. Captured outside of
+    # self.history so condensation can't drop it — /debug needs the original
+    # user prompt as the verifier brief, and after a long iter-loop the user
+    # message has usually been condensed out of history.
+    last_user_message: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.history:
@@ -733,6 +744,10 @@ class Agent:
             return "substantive"
 
     def run_turn(self, user_message: str) -> tuple[str, set[str], TurnStats]:
+        # Capture the raw user prompt before any plan-mode rewriting so /debug
+        # can recover it after history condensation drops it.
+        self.last_user_message = user_message
+
         # Refresh the system prompt so /doc and /undoc take effect immediately.
         # Cheap when no docs are attached (string identity check); rebuilds
         # only when the attached set changed.

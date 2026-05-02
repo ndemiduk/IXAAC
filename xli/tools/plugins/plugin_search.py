@@ -37,7 +37,7 @@ def t_plugin_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "Suggest: install/subscribe a plugin that fits, or fall back to "
             "web_search/bash. Do NOT fabricate plugin output."
         )
-    out = ["Top matches (use plugin_call for structured actions, or plugin_get for full docs):"]
+    out = ["Top matches — prefer `plugin_call` when the plugin lists actions (structured, no curl). Use `plugin_get` only for legacy plugins or full prose:"]
     for p, score in matches:
         cats = ", ".join(p.categories()) or "—"
         manifest = p.manifest()
@@ -55,9 +55,13 @@ def t_plugin_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
                 ]
                 param_str = ", ".join(user_params) if user_params else "(none)"
                 out.append(f"      {a.id}({param_str}) — {a.description}")
+            # Recommended invocation (copy-paste ready for the first action)
+            first_action = manifest.actions[0].id if manifest.actions else "ACTION"
+            example_params = "{...}" if any(a.params for a in manifest.actions) else "{}"
+            out.append(f"    → plugin_call(plugin=\"{p.id}\", action=\"{first_action}\", params={example_params})")
         else:
             out.append(
-                f"- [{p.id}] (score={score:.1f}, risk={p.risk()}, categories={cats}) [legacy — use plugin_get + bash]\n"
+                f"- [{p.id}] (score={score:.1f}, risk={p.risk()}, categories={cats}) [legacy — use plugin_get + bash, no manifest]\n"
                 f"    {p.name()}: {p.description() or '(no description)'}"
             )
     return ToolResult("\n".join(out))

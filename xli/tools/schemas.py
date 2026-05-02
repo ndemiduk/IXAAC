@@ -274,55 +274,57 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "plugin_search",
-                "description": "Search subscribed plugins by intent. Returns matches with id/score/risk. Use plugin_get to read full docs.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "intent": {
-                            "type": "string",
-                            "description": "What data or action you need (e.g. current weather, recent filings).",
-                        },
-                    },
-                    "required": ["intent"],
-                },
+                	                    "description": "Search subscribed plugins by intent. Returns top matches with actions + recommended plugin_call invocations. Prefer plugin_call for structured plugins.",
+	                    "parameters": {
+	                        "type": "object",
+	                        "properties": {
+	                            "intent": {
+	                                "type": "string",
+	                                "description": "What data or action you need (e.g. 'current weather in Aurora').",
+	                            },
+	                        },
+	                        "required": ["intent"],
+	                    },
             },
         },
         {
             "type": "function",
             "function": {
                 "name": "plugin_get",
-                "description": "Read full markdown of a subscribed plugin (endpoints, auth, examples).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
-                    },
-                    "required": ["name"],
-                },
+                	                "description": "Read a subscribed plugin. Use mode='manifest' (preferred, low tokens) to get only the action spec, mode='condensed' for summary, or mode='full' (default) for the complete .md.",
+	                "parameters": {
+	                    "type": "object",
+	                    "properties": {
+	                        "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
+	                        "mode": {"type": "string", "description": "manifest | condensed | full (default)", "enum": ["manifest", "condensed", "full"]},
+	                    },
+	                    "required": ["name"],
+	                },
             },
         },
         {
             "type": "function",
             "function": {
                 "name": "plugin_call",
-                "description": (
-                    "Invoke a structured plugin action directly — no curl needed. "
-                    "Only works for plugins with an actions manifest. Falls back to "
-                    "plugin_get + bash for legacy plugins without actions."
-                ),
+                	                    "description": (
+	                        "Invoke a structured plugin action directly — no curl needed. "
+	                        "Use plugin_search first to find plugins + actions. "
+	                        "For legacy plugins without actions, use plugin_get(mode='full') + bash."
+	                    ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "plugin": {
-                            "type": "string",
-                            "description": "Plugin id (e.g. 'open-meteo').",
-                        },
-                        "action": {
-                            "type": "string",
-                            "description": "Action id (e.g. 'current_weather').",
-                        },
-                        "params": {
-                            "type": "object",
+                        	                        "plugin": {
+	                            "type": "string",
+	                            "description": "Plugin id from plugin_search (e.g. 'open-meteo').",
+	                        },
+	                        "action": {
+	                            "type": "string",
+	                            "description": "Action id from plugin_search output (e.g. 'current_weather').",
+	                        },
+	                        "params": {
+	                            "type": "object",
+	                            "description": "User params only (defaults/consts auto-filled).",
                             "description": "Action parameters as key-value pairs.",
                         },
                     },

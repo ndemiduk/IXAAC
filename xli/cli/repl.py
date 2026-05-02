@@ -60,6 +60,7 @@ from .attachments import (
     load_attached_docs,
     load_attached_refs,
 )
+from .debug import _handle_debug_command
 from .slash_commands import (
     _handle_doc_command,
     _handle_lib_command,
@@ -93,6 +94,7 @@ SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /undoc <name>         Detach a previously-attached doc
   /lib [...]            Plugin library: (no arg) = subscribed, all / subscribe / unsubscribe / remove
   /get <intent>         Find + invoke a subscribed plugin matching the intent
+  /debug                Spawn a fresh-context verifier on uncommitted changes from the last turn
   /history              Show current in-memory history size + rough token estimate
   /status               Show project state (collection, pool, mode flags, refs, docs)
   /projects             List registered projects (current marked ●)
@@ -117,6 +119,7 @@ CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
   /undoc <name>         Detach a previously-attached doc
   /lib [...]            Plugin library: (no arg) = subscribed, all / subscribe / unsubscribe / remove
   /get <intent>         Find + invoke a subscribed plugin matching the intent
+  /debug                Spawn a fresh-context verifier on uncommitted changes from the last turn
   /status               Show persona state (turns on disk, attached refs/docs)
 	  /history              Show current in-memory history size + rough token estimate
   /sync                 Sync turn-files to the Collection now
@@ -545,6 +548,8 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             continue
         if _handle_lib_command(user_input, project):
             continue
+        if _handle_debug_command(user_input, agent, project):
+            continue
         if user_input.startswith("/get "):
             intent = user_input[len("/get "):].strip()
             if intent:
@@ -774,6 +779,8 @@ def cmd_code(args: argparse.Namespace) -> int:
         if _handle_doc_command(user_input, agent, project):
             continue
         if _handle_lib_command(user_input, project):
+            continue
+        if _handle_debug_command(user_input, agent, project):
             continue
         if user_input.startswith("/get "):
             intent = user_input[len("/get "):].strip()

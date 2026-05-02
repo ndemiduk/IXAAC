@@ -10,24 +10,24 @@ auth_type: none
 auth_env_vars: []
 actions:
   - id: geocode
-    description: Look up latitude/longitude for a city name
+    description: Look up latitude/longitude for a city name (e.g. 'Aurora, IL' or 'London')
     method: GET
     url: https://geocoding-api.open-meteo.com/v1/search
     params:
-      name: {required: true, description: "City name (URL-encoded), e.g. 'Seattle' or 'Tokyo'"}
-      count: {default: "1", description: "Number of results to return"}
-    response_shape: ".results[] → {latitude, longitude, country, timezone}"
+      name: {required: true, description: "City name (e.g. 'Aurora, IL'), auto URL-encoded"}
+      count: {default: "1", description: "Number of results (1-10)"}
+    response_shape: ".results[0] → {latitude, longitude, name, country, timezone}"
   - id: current_weather
-    description: Current weather + hourly forecast for a location
+    description: Current weather + hourly forecast for lat/lon (use geocode first for cities)
     method: GET
     url: https://api.open-meteo.com/v1/forecast
     params:
-      latitude: {required: true, description: "Decimal degrees, negative = south"}
-      longitude: {required: true, description: "Decimal degrees, negative = west"}
+      latitude: {required: true, description: "Decimal degrees (-90 to 90), e.g. 41.77"}
+      longitude: {required: true, description: "Decimal degrees (-180 to 180), e.g. -88.32"}
       current_weather: {const: "true"}
       hourly: {default: "temperature_2m,precipitation_probability,wind_speed_10m"}
       timezone: {default: "auto"}
-    response_shape: ".current_weather → {temperature, windspeed, weathercode}; .hourly → parallel arrays"
+    response_shape: ".current_weather → {temperature_2m, windspeed_10m, weathercode, ...}; .hourly → arrays"
   - id: daily_forecast
     description: Daily forecast (next 7 days) for a location
     method: GET
