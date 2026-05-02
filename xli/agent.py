@@ -401,6 +401,25 @@ def _detect_unsupported_claim(text: str, stats: "TurnStats") -> Optional[str]:
     return m.group(1).lower() if m else None
 
 
+def _scrub_history(messages: list) -> list:
+    """Drop assistant messages with neither content nor tool_calls.
+
+    xAI's API rejects requests where any message has no content elements
+    (HTTP 400 — "Each message must have at least one content element").
+    The append path in run_turn now refuses to insert such entries, but
+    this scrub at the send boundary catches any that snuck in via other
+    paths (older sessions, condense_history edge cases, future code).
+    Cheap, idempotent, no side effects on the in-memory history list.
+    """
+    result = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            if not m.get("content") and not m.get("tool_calls"):
+                continue
+        result.append(m)
+    return result
+
+
 def _cache_headers(conversation_id: Optional[str], suffix: str = "") -> Optional[dict]:
     """Build the xAI prompt-cache header.
 
@@ -917,6 +936,25 @@ class Agent:
                     )
                 )
 
+            # Empty-message guard: if the model returned neither content nor
+            # tool_calls, do NOT append an entry. xAI's API rejects requests
+            # where any message has no content elements ("HTTP 400 — Each
+            # message must have at least one content element"), so appending
+            # would poison every subsequent turn until /reset or restart.
+            # Most common trigger: force_final_answer=True on the iteration
+            # cap, where the model is forbidden from emitting tool calls and
+            # also fails to produce text — typical of reasoning models that
+            # exhausted tokens on private reasoning_content.
+            if not msg.content and not msg.tool_calls:
+                stats.warnings.append(
+                    "model produced no content and no tool calls this iteration "
+                    "— ended turn without poisoning history. If this happened "
+                    "at the iteration cap with a reasoning model, switch to a "
+                    "non-reasoning model or raise max_tool_iterations."
+                )
+                self.condense_history()
+                return ("", ctx.dirty_paths, stats)
+
             entry: dict[str, Any] = {"role": "assistant"}
             if msg.content:
                 entry["content"] = msg.content
@@ -996,7 +1034,7 @@ class Agent:
         """
         kwargs: dict[str, Any] = dict(
             model=model,
-            messages=self.history,
+            messages=_scrub_history(self.history),
             temperature=temperature,
             stream=True,
             stream_options={"include_usage": True},
