@@ -1,4 +1,4 @@
-from xli.cli_new import main
+from xli.cli import main
 
 if __name__ == "__main__":
     main()

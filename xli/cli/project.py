@@ -1,4 +1,4 @@
-"""Project lifecycle subcommands: init / sync / gc / workspaces.
+"""Project lifecycle subcommands: init / new / sync / gc / scratch / projects / workspaces.
 
 These all operate on a project (`.xli/project.json` directory) or the
 cross-project registry/workspaces files at ~/.config/xli/.
@@ -18,6 +18,93 @@ from xli.registry import Registry
 from xli.sync import init_project, sync_project
 
 console = Console()
+
+
+def cmd_new(args: argparse.Namespace) -> int:
+    """Create a new project directory and initialize it."""
+    name = args.name
+    base = Path(args.path or ".").resolve()
+    project_root = base / name
+    if project_root.exists():
+        console.print(f"[red]already exists: {project_root}[/red]")
+        return 1
+    project_root.mkdir(parents=True)
+    console.print(f"[green]✓[/green] created {project_root}")
+    return cmd_init(
+        argparse.Namespace(
+            path=str(project_root),
+            name=name,
+            collection_id=None,
+            sync=True,
+            force=False,
+        )
+    )
+
+
+def cmd_scratch(args: argparse.Namespace) -> int:
+    """Create an ephemeral local-only project under ~/.xli/scratch/<name>/ and drop into chat.
+
+    Use for: one-off file-management tasks ("rename these", "find duplicates"),
+    quick experiments, anything you don't want to upload as a project.
+    For snapshotting an existing big directory (NAS, media collection), run
+    `xli init --local --snapshot` *in that directory* instead — scratch creates
+    a fresh empty dir.
+    """
+    from datetime import datetime
+
+    from .repl import cmd_code  # imported lazily to avoid eager REPL deps for non-REPL paths
+
+    name = args.name or datetime.now().strftime("%Y%m%d-%H%M%S")
+    scratch_root = (Path.home() / ".xli" / "scratch" / name).resolve()
+    scratch_root.mkdir(parents=True, exist_ok=True)
+
+    existing = ProjectConfig.load(scratch_root)
+    if existing and not args.force:
+        console.print(f"[yellow]scratch project already exists at[/yellow] {scratch_root}")
+    else:
+        project = init_project(
+            None,
+            scratch_root,
+            name=f"scratch/{name}",
+            local_only=True,
+            snapshot=False,  # empty dir; nothing to snapshot
+        )
+        console.print(
+            f"[green]✓[/green] scratch project [bold]{project.name}[/bold] at {scratch_root}"
+        )
+
+    if args.no_chat:
+        return 0
+    return cmd_code(argparse.Namespace(target=str(scratch_root), yolo=args.yolo))
+
+
+def cmd_projects(args: argparse.Namespace) -> int:
+    registry = Registry.load()
+    entries = registry.entries
+    flt = (args.filter or "").lower()
+    if flt:
+        entries = [
+            e for e in entries
+            if flt in e.name.lower() or flt in e.path.lower()
+        ]
+    if not entries:
+        msg = (
+            f"no projects matching {args.filter!r}" if flt
+            else "no registered projects yet — run `xli init` in a project dir"
+        )
+        console.print(f"[yellow]{msg}[/yellow]")
+        return 0
+    console.print("[bold]registered xli projects:[/bold]")
+    for entry in sorted(entries, key=lambda e: e.name.lower()):
+        alive = (
+            Path(entry.path).is_dir()
+            and (Path(entry.path) / ".xli" / "project.json").exists()
+        )
+        marker = "[green]●[/green]" if alive else "[red]✗[/red]"
+        console.print(
+            f"  {marker} [bold]{entry.name:<24}[/bold]  {entry.path:<50}  [dim]{entry.collection_id}[/dim]"
+        )
+    return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:

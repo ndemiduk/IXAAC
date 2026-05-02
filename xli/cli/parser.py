@@ -1,23 +1,21 @@
-"""XLI CLI: argparse wiring + small command shims (init/scratch/projects/config/new/help).
+"""Argparse setup for xli + the trivial cmd_help/cmd_config commands.
 
-Subcommand implementations live in sibling modules (auth.py, bootstrap.py, doc.py,
-plugin.py, project.py, repl.py, etc.). This file is now mostly the argparse build
-in main() plus the few commands too small to warrant their own file.
+`build_parser()` returns the fully-wired ArgumentParser. cli.py's main() calls
+this, then handles parse + dispatch + workspace touch. Living here together with
+HELP_TEXT/cmd_help/cmd_config keeps the dispatcher (cli.py) free of any
+import-cycle worries — the small commands wired into the parser are defined
+right next to the wiring.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
 from rich.console import Console
 
 from xli import __version__
 from xli.bootstrap import DEFAULT_EXPIRE_DAYS
-from xli.config import GlobalConfig, ProjectConfig
-from xli.registry import Registry
-from xli.sync import init_project
+from xli.config import GlobalConfig
 
 from .ask import cmd_ask, cmd_daemon
 from .auth import cmd_auth
@@ -26,7 +24,10 @@ from .doc import cmd_doc
 from .keys import cmd_keys
 from .models import cmd_models
 from .plugin import cmd_plugin
-from .project import cmd_gc, cmd_init, cmd_sync, cmd_workspaces
+from .project import (
+    cmd_gc, cmd_init, cmd_new, cmd_projects, cmd_scratch,
+    cmd_sync, cmd_workspaces,
+)
 from .repl import cmd_chat, cmd_code
 from .setup import cmd_setup
 from .status import cmd_status
@@ -103,69 +104,6 @@ def cmd_help(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_scratch(args: argparse.Namespace) -> int:
-    """Create an ephemeral local-only project under ~/.xli/scratch/<name>/ and drop into chat.
-
-    Use for: one-off file-management tasks ("rename these", "find duplicates"),
-    quick experiments, anything you don't want to upload as a project.
-    For snapshotting an existing big directory (NAS, media collection), run
-    `xli init --local --snapshot` *in that directory* instead — scratch creates
-    a fresh empty dir.
-    """
-    from datetime import datetime
-    name = args.name or datetime.now().strftime("%Y%m%d-%H%M%S")
-    scratch_root = (Path.home() / ".xli" / "scratch" / name).resolve()
-    scratch_root.mkdir(parents=True, exist_ok=True)
-
-    existing = ProjectConfig.load(scratch_root)
-    if existing and not args.force:
-        console.print(f"[yellow]scratch project already exists at[/yellow] {scratch_root}")
-    else:
-        project = init_project(
-            None,
-            scratch_root,
-            name=f"scratch/{name}",
-            local_only=True,
-            snapshot=False,  # empty dir; nothing to snapshot
-        )
-        console.print(
-            f"[green]✓[/green] scratch project [bold]{project.name}[/bold] at {scratch_root}"
-        )
-
-    if args.no_chat:
-        return 0
-    return cmd_code(argparse.Namespace(target=str(scratch_root), yolo=args.yolo))
-
-
-def cmd_projects(args: argparse.Namespace) -> int:
-    registry = Registry.load()
-    entries = registry.entries
-    flt = (args.filter or "").lower()
-    if flt:
-        entries = [
-            e for e in entries
-            if flt in e.name.lower() or flt in e.path.lower()
-        ]
-    if not entries:
-        msg = (
-            f"no projects matching {args.filter!r}" if flt
-            else "no registered projects yet — run `xli init` in a project dir"
-        )
-        console.print(f"[yellow]{msg}[/yellow]")
-        return 0
-    console.print("[bold]registered xli projects:[/bold]")
-    for entry in sorted(entries, key=lambda e: e.name.lower()):
-        alive = (
-            Path(entry.path).is_dir()
-            and (Path(entry.path) / ".xli" / "project.json").exists()
-        )
-        marker = "[green]●[/green]" if alive else "[red]✗[/red]"
-        console.print(
-            f"  {marker} [bold]{entry.name:<24}[/bold]  {entry.path:<50}  [dim]{entry.collection_id}[/dim]"
-        )
-    return 0
-
-
 def cmd_config(args: argparse.Namespace) -> int:
     path = GlobalConfig.write_template()
     console.print(f"[green]✓[/green] config at {path}")
@@ -173,28 +111,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_new(args: argparse.Namespace) -> int:
-    """Create a new project directory and initialize it."""
-    name = args.name
-    base = Path(args.path or ".").resolve()
-    project_root = base / name
-    if project_root.exists():
-        console.print(f"[red]already exists: {project_root}[/red]")
-        return 1
-    project_root.mkdir(parents=True)
-    console.print(f"[green]✓[/green] created {project_root}")
-    return cmd_init(
-        argparse.Namespace(
-            path=str(project_root),
-            name=name,
-            collection_id=None,
-            sync=True,
-            force=False,
-        )
-    )
-
-
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="xli", description="Grok + xAI Collections coding agent.")
     p.add_argument("--version", action="version", version=f"xli {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -443,24 +360,4 @@ def main() -> int:
     p_help = sub.add_parser("help", help="Show grouped command listing.")
     p_help.set_defaults(func=cmd_help)
 
-    args = p.parse_args()
-
-    # Auto-touch the cwd as a workspace, so the registry keeps an honest
-    # last_active timeline for every dir xli has run in. Skip stateless
-    # commands (config/setup/keys/etc.) and the workspaces command itself
-    # (`xli workspaces` is a registry inspection, not a workspace activity).
-    _STATELESS_COMMANDS = {
-        "help", "config", "setup", "models", "keys", "bootstrap",
-        "gc", "workspaces", "ask", "daemon",
-    }
-    if args.command not in _STATELESS_COMMANDS:
-        try:
-            ws_mod.touch(Path.cwd())
-        except Exception:
-            pass  # touching is best-effort; never block the actual command
-
-    return args.func(args) or 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    return p

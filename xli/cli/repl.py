@@ -91,7 +91,7 @@ SLASH_HELP = """[bold]Code REPL slash commands[/bold]
   /unref <persona>      Detach a previously-attached persona
   /doc [name]           Attach a reference doc into the system prompt (no arg = list)
   /undoc <name>         Detach a previously-attached doc
-  /lib [...]            Plugin library: list / all / subscribe / unsubscribe / remove
+  /lib [...]            Plugin library: (no arg) = subscribed, all / subscribe / unsubscribe / remove
   /get <intent>         Find + invoke a subscribed plugin matching the intent
   /history              Show current in-memory history size + rough token estimate
   /status               Show project state (collection, pool, mode flags, refs, docs)
@@ -115,7 +115,7 @@ CHAT_SLASH_HELP = """[bold]Persona chat slash commands[/bold]
   /unref <persona>      Detach a previously-attached persona
   /doc [name]           Attach a reference doc into the system prompt (no arg = list)
   /undoc <name>         Detach a previously-attached doc
-  /lib [...]            Plugin library: list / all / subscribe / unsubscribe / remove
+  /lib [...]            Plugin library: (no arg) = subscribed, all / subscribe / unsubscribe / remove
   /get <intent>         Find + invoke a subscribed plugin matching the intent
   /status               Show persona state (turns on disk, attached refs/docs)
 	  /history              Show current in-memory history size + rough token estimate

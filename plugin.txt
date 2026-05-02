@@ -1,0 +1,99 @@
+  The inefficient part is not “plugins are risky”;
+  it is that the model has to read prose, infer the right curl, synthesize
+  shell, pass the bash intent gate, then interpret the result. That spends
+  reasoning on something that should be mechanical.
+
+  The better change: make plugins structured capabilities, not markdown
+  instructions.
+
+  Current flow:
+
+  plugin_search → plugin_get full markdown → model thinks → model writes curl →
+  bash(intent=network) → user may approve → result
+
+  Recommended flow:
+
+  plugin_search → plugin_call(plugin, action, params) → tool builds/runs request
+  → result
+
+  Keep markdown only as human docs/fallback. The executable part should be a
+  small manifest.
+
+  Example shape:
+
+  ---
+  id: open-meteo
+  name: Open-Meteo
+  description: Weather forecasts and current conditions
+  categories: [weather]
+  risk: low
+  trust: subscription
+  actions:
+    - id: current_weather
+      description: Get current weather by lat/lon
+      method: GET
+      url: https://api.open-meteo.com/v1/forecast
+      params:
+        latitude: {required: true}
+        longitude: {required: true}
+        current_weather: {const: true}
+        timezone: {default: auto}
+  ---
+
+  Then the model calls:
+
+  {
+    "plugin": "open-meteo",
+    "action": "current_weather",
+    "params": {
+      "latitude": "41.76",
+      "longitude": "-88.32"
+    }
+  }
+
+  No curl synthesis. No shell. No markdown dump. Much less reasoning.
+
+  On gating: Once the user has installed and subscribed a plugin, that should be
+  treated as a capability grant. The current bash gate at
+  Projects/iXaac/xli/tools/execution/bash.py:85 is too blunt for plugin calls
+  because it cannot distinguish “arbitrary network shell” from “user-enabled API
+  action.”
+
+  I would change the trust model to:
+
+  - plugin_call for subscribed plugins bypasses the generic bash network prompt.
+  - /lib subscribe <id> is the trust moment.
+  - High-risk plugins can show a stronger subscribe-time warning, but not per-
+    call prompts by default.
+  - Add optional per-action confirm: always only for genuinely irreversible/
+    destructive operations.
+  - Keep the bash gate for arbitrary shell commands.
+
+  Important nuance: don’t just make curl “less gated” inside bash. Move plugin
+  execution out of bash where possible. A plugin_call tool can use Python HTTP
+  APIs, redact auth, validate params, restrict hosts to the manifest URL, and
+  log calls. That is both faster and safer than letting the model emit arbitrary
+  curl.
+
+  We may also rename/reframe risk. Our xmpp_send plugin is marked risk: low, but
+  it sends external messages. In the current worldview that feels wrong; in the
+  capability-grant worldview it is fine only if risk means “blast radius after
+  subscription,” not “does this mutate the outside world.” Better fields:
+
+  effect: external-write   # read-only | external-write | local-system |
+  destructive
+  trust: subscription      # subscription | always-confirm
+
+  Most efficient implementation path:
+
+  1. Add plugin_call tool.
+  2. Extend plugin frontmatter with actions.
+  3. Make plugin_search return matching actions, not just plugin docs.
+  4. Keep plugin_get as fallback/docs.
+  5. Have plugin_call bypass bash approval for subscribed plugins.
+  6. Audit-log plugin calls with secrets redacted.
+
+  That preserves the spirit of our system: user-owned, high-agency, not
+  overprotected. But it removes the expensive part: asking the model to re-
+  derive curl from prose every time.
+
