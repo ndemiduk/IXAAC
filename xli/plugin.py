@@ -487,6 +487,8 @@ def search_plugins(intent: str, plugins: list[Plugin], limit: int = 5) -> list[t
             for a in manifest.actions:
                 parts.append(a.id)
                 parts.append(a.description)
+                if a.response_shape:
+                    parts.append(a.response_shape)
                 for pname, pspec in a.params.items():
                     parts.append(pname)
                     if pspec.description:
