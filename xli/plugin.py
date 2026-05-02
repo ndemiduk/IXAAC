@@ -234,7 +234,7 @@ class Plugin:
                 return meta if isinstance(meta, dict) else {}
             except Exception:
                 pass
-        return self.parsed()[0]
+        return self.parsed[0]
 
     def manifest(self):
         """Structured action manifest, or None for legacy plugins."""
@@ -242,7 +242,7 @@ class Plugin:
         return parse_manifest(self.read_raw())
 
     def body(self) -> str:
-        return self.parsed()[1]
+        return self.parsed[1]
 
     def name(self) -> str:
         return self.metadata().get("name") or self.id
@@ -476,15 +476,22 @@ def search_plugins(intent: str, plugins: list[Plugin], limit: int = 5) -> list[t
             (meta.get("description") or "").lower(),
             " ".join(meta.get("categories") or []).lower(),
         ]
-        # Include action descriptions in the haystack so intent keywords
-        # like "geocode" or "trending" match even if the plugin-level
-        # description doesn't mention them.
+        # Include action ids, descriptions, AND param names + descriptions
+        # in the haystack. Param descriptions often contain example values
+        # (e.g. "bitcoin, ethereum" in coingecko price.ids) that the
+        # plugin-level description doesn't mention.
         action_text = ""
         manifest = p.manifest()
         if manifest:
-            action_text = " ".join(
-                f"{a.id} {a.description}" for a in manifest.actions
-            ).lower()
+            parts = []
+            for a in manifest.actions:
+                parts.append(a.id)
+                parts.append(a.description)
+                for pname, pspec in a.params.items():
+                    parts.append(pname)
+                    if pspec.description:
+                        parts.append(pspec.description)
+            action_text = " ".join(parts).lower()
         haystack = " ".join(haystack_parts) + " " + action_text
         if not haystack.strip():
             continue

@@ -3,9 +3,25 @@
 *The cloud that knows your code — a personal AI substrate built on xAI's
 Grok and Collections.*
 
-> **Status: alpha.** Works end-to-end against a real xAI account.
-> Architecture is settled; specific features are still in flux. Expect rough
-> edges. **Linux / macOS only.** Python 3.11+.
+Most AI dev tools are shaped like a chatbot pretending to be a developer — you talk to it, it does work for you. iXaac is trying to invert that: the human as the operator, AIs as the workforce, the CLI as the dispatch layer that keeps them coordinated, auditable, and on the same shared state. Plugins as structured capabilities with vault-backed auth (not prose recipes the model has to re-derive every call). Personas with persistent memory. An XMPP/OMEMO fabric connecting machines.
+
+That's the shape it's reaching for. The substrate works end-to-end against a real xAI account today; the specific feature surfaces keep moving as edge cases surface. Read the **Project status** section below before deciding whether it's worth your time at this stage.
+
+**Linux / macOS only.** Python 3.11+.
+
+---
+
+## Project status
+
+May 2026:
+
+- **Built by one person**, with multiple AI assistants doing the typing. There's no team, no roadmap committee, no SLA. Direction is set by what makes the system more useful for daily personal use first.
+- **Substrate is real, individual features are in flux.** The architecture (REPL, tool runtime, plugin host, persona system, encrypted XMPP fabric) is settled and works. Specific feature shapes — the plugin manifest schema, the `/debug` verifier, the `/get` rephrasing — keep getting refined as real-world traces expose edge cases.
+- **Things that shipped this week** include the structured plugin manifest + `plugin_call`, the fresh-context `/debug` verifier subagent, plugin-search haystack improvements, and several overnight indent/syntax fixes. Things that shipped last month may have been re-shaped since.
+- **Setup is non-trivial.** Local Python venv, an xAI account, optional Tailscale + Prosody for the multi-machine half. The `xli setup` command genuinely works in 5 minutes when the happy path holds. When it doesn't, the answer is "read the source," not "open a ticket."
+- **Not production-ready.** Not for replacing code review on a team. Not a managed service. Not a startup. A personal substrate that the author hopes will be useful to a few people of similar shape, eventually.
+
+If "still finding the shape of this thing" makes you nervous, come back in a few months. If it sounds like the kind of project you'd want to poke at with a screwdriver, keep reading.
 
 ---
 
@@ -21,34 +37,37 @@ working from your phone.
 The internal name on disk is `xli` — that's the binary you'll type. The brand
 is **iXaac**.
 
-## What's different
+## What's different (the shape it's reaching for)
 
-There's a category gap in the AI tooling landscape that iXaac sits in:
+The space iXaac is trying to occupy:
 
-- **Cursor / Claude Code / Codex / Copilot** — vendor-curated coding agents.
-  Their tool palette is what they ship, extended via MCP servers (heavyweight,
-  professionally maintained, not yours). You live in their app.
-- **ChatGPT / Claude.ai / Grok app** — vendor-hosted SaaS chatbots. Memory
-  features exist but are vendor-controlled. No file ops, no multi-machine,
-  you re-paste your project every conversation.
-- **Self-hosted RAG apps (Khoj, MemGPT)** — usually one machine, one purpose,
-  no agent loop.
-- **LangChain / agent frameworks** — toolkits to build *one* product. Not a
-  shell you live in.
+- Closer to a substrate than an app. You build up your own personas, docs,
+  and plugins; the system grows with what you curate. Empty out of the box,
+  more useful the more you invest.
+- Multi-vendor by design. Grok is the default, but the architecture
+  treats Claude / OpenAI / Gemini as plugins or hand-off targets rather
+  than rebuilding around any single vendor's loop.
+- Local-first in the places that matter. Files on disk are the source of
+  truth, secrets stay in a local vault, the XMPP fabric runs on your own
+  tailnet.
 
-iXaac sits in the unoccupied gap: **a substrate that rewards investment.**
-Write a few personas, a few reference docs, a few plugins for APIs you
-actually use, and the system becomes uniquely yours. Power users will love
-it; casual users will bounce — and that's fine.
+Adjacent (but doing something different):
 
-The thesis in one sentence:
+- **Editor-embedded coding agents** (Cursor, Claude Code, Copilot) — better
+  if you want a polished IDE experience and a vendor-curated tool palette.
+- **Vendor SaaS chatbots** (ChatGPT, Claude.ai, Grok web) — better for
+  casual use and zero-setup memory.
+- **Self-hosted RAG apps** (Khoj, MemGPT) — better if you want a single
+  focused thing rather than a substrate.
+- **Agent frameworks** (LangChain, etc.) — better if you're building *one*
+  product, not living in a shell.
+
+iXaac is trying for the corner where you want to keep building your own
+tooling and the AI is one tool among many. Whether that corner is actually
+worth occupying — that's part of what the alpha is for. The thesis in one
+sentence:
 
 > **Vendor provides primitives; user composes the system.**
-
-The reason most AI tools don't offer what iXaac does isn't technical — it's
-that walls are their business model. iXaac doesn't have walls because it's
-built on commodity primitives (xAI Collections, slixmpp, Tailscale, OMEMO).
-That trade is the whole point.
 
 ---
 
@@ -143,7 +162,7 @@ Both REPLs share most of these:
 
 ```
 /help, /status, /sync, /reset, /cost, /yolo, /safe, /models, /temp,
-/projects, /plan, /execute, /cancel, /ref, /unref, /doc, /undoc,
+/projects, /plan, /execute, /cancel, /debug, /ref, /unref, /doc, /undoc,
 /lib, /get, /persona, /personas, /edit, /forget, /exit, !<shell>
 ```
 
@@ -184,9 +203,12 @@ warning — bigger reference material should become a persona instead.
 ### `/get <intent>` — invoke a plugin
 
 Find and call a subscribed plugin matching a natural-language intent.
-*"What's the weather in Aurora?"* → `plugin_search` finds Open-Meteo →
-`plugin_get` reads its doc → agent composes the curl call → result comes
-back.
+*"What's the latest bitcoin price?"* → `plugin_search` finds CoinGecko and
+returns its action signatures inline → agent calls
+`plugin_call(plugin="coingecko", action="price", params={"ids": "bitcoin"})`
+directly → result comes back. No curl synthesis, no token churn re-deriving
+the URL each call. Vault-stored API keys are injected into the request at
+call time, never exposed to the model.
 
 ### `/lib` — manage the plugin library
 
@@ -199,14 +221,27 @@ back.
 
 ## Plugins
 
-A **plugin** is a markdown file at `~/.config/xli/plugins/<id>.md` describing
-an external API — its endpoints, auth shape, curl examples, gotchas. The
-agent reads it and composes the actual call via `bash`. No MCP servers to
-spawn, no SDKs to import. Write one in 60 seconds, share by sending a
-markdown file.
+A **plugin** is a markdown file at `~/.config/xli/plugins/<id>.md` with YAML
+frontmatter describing an external API. There are two flavors, and both
+coexist:
 
-iXaac ships a starter pack of 11 read-only plugins covering categories you'll
-actually use. Install with one command:
+**Structured actions (preferred).** The frontmatter declares an `actions:`
+block — typed actions with method, URL template, params (required / default /
+const / enum), and a response shape hint. The agent invokes them via
+`plugin_call(plugin, action, params)`. The harness handles auth injection
+from the vault, host-pinning (the resolved URL host must match the manifest's
+declared host — guards against template tampering), parameter validation,
+secret redaction in responses, and an audit log. The model picks an action
+and fills params; it never sees secrets, never composes URLs by hand, never
+opens a subprocess for an HTTP call.
+
+**Legacy markdown (still supported).** Plugins with no `actions:` block work
+the old way — agent reads the full markdown, composes a curl call, runs it
+via `bash`. No MCP servers to spawn, no SDKs to import.
+
+11 of the 12 stock plugins ship with structured action manifests. Write your
+own with `xli plugin --new <id>` (opens a starter template in `$EDITOR`),
+share by sending a markdown file.
 
 ```bash
 xli plugin --install-stock
@@ -225,6 +260,7 @@ xli plugin --install-stock
 | `bluesky` | none | Social search + popular feeds |
 | `xtwitter` | paid key | X v2 search + trends + timelines |
 | `aviationstack` | free key | Flight status by number/route |
+| `xmpp_send` | XMPP password | OMEMO-encrypted notification sender (exec action) |
 
 Plugin credentials live in an encrypted vault (Fernet, OS-keyring-backed by
 default with passphrase fallback). Set them with:
@@ -233,13 +269,28 @@ default with passphrase fallback). Set them with:
 xli auth set alpha-vantage ALPHA_VANTAGE_KEY=<your-key>
 ```
 
-The bash tool injects vault values only for plugins subscribed in the current
+For structured-action plugins, vault values are injected by `plugin_call`
+into URL templates / headers / params at request time — never into the
+model's tool args, never into the shell environment. For legacy plugins, the
+bash tool injects vault values only for plugins subscribed in the current
 session, only when the command actually references the variable, and only
 into that one subprocess's environment. Plaintext never lands on disk;
 secrets enter process memory only at call time.
 
-Write your own plugin with `xli plugin --new <id>` — opens a starter template
-in `$EDITOR`.
+### Trust and effect (the new manifest schema)
+
+New manifests declare two orthogonal fields that replace the old single
+`risk:` value:
+
+- `effect: read-only | external-write | local-system | destructive` —
+  what the action *does*.
+- `trust: subscription | always-confirm` — when the user has to re-confirm.
+
+Together they describe both *what could happen* and *whether the user is
+already saying "yes, fine, just do it"* by being subscribed.
+`always-confirm` actions prompt at the REPL before each invocation (skipped
+under `--yolo`). Old `risk:` values still parse via a backward-compat
+mapping — no plugin migration required.
 
 ---
 
@@ -344,6 +395,23 @@ After every turn, if the model claims past-tense work was done (`verified`,
 yellow warning surfaces: *⚠ model said "X" but called 0 tools — verify
 before trusting.* False positives are tolerable; the warning is a nudge, not
 a wall.
+
+### Fresh-context verifier (`/debug`)
+
+The hallucination guard catches the model claiming work it didn't do.
+`/debug` catches work the model *did* do but did wrong. After any turn that
+edits files, type `/debug` and a verifier subagent spawns with no working
+context — it sees only the original task and the diff (committed +
+uncommitted, against a baseline snapshotted at turn start). It reports PASS
+or a numbered FAIL list with file:line citations. The verifier has read-only
+investigation tools (read, grep, bash for import smoke-tests) but cannot
+edit. Output prints to console; it doesn't enter history, so it doesn't bias
+the next turn.
+
+Why a separate subagent instead of "now critique what you just did" in the
+same context? Because same-context self-critique tends to defend earlier
+choices and miss the same things twice. A verifier with no memory of the
+decisions that produced the diff catches things the build-mode agent can't.
 
 ### Plan-history archive
 
@@ -472,6 +540,7 @@ These work the same in both `xli code` and `xli chat`:
 | `/plan` | Enter plan mode. Read-only investigation tools + scoped scratchpad at `.xli/plan-notes.md`. Resumable across `/exit` and across max-iteration aborts. |
 | `/execute` | Approve and execute the plan. Archives the scratchpad to `.xli/plans/approved-<ts>.md`. |
 | `/cancel` | Drop plan mode. Archives the scratchpad to `.xli/plans/cancelled-<ts>.md` for recovery. |
+| `/debug` | Spawn a fresh-context verifier subagent on everything the last turn changed (committed + uncommitted, since the turn started). Reads only the original task + the diff — no working-context bias — and reports PASS or numbered FAIL items with file:line. Output prints to console, doesn't pollute history. |
 
 ### REPL — knowledge layer
 
@@ -515,33 +584,45 @@ Both REPLs show ambient state in the prompt prefix:
 
 ## What it isn't
 
-- **It's not Cursor.** No editor wrapper. iXaac runs in a terminal; you bring
-  your own editor.
-- **It's not MCP.** Plugins are markdown files describing APIs. The agent
-  reads them and uses bash. No subprocess servers, no installation friction,
-  no ongoing maintenance per-plugin.
-- **It's not vendor-curated.** No app store, no marketplace. You write the
-  plugins, the personas, the docs, the verbs. The system rewards investment.
-- **It's not for casual users.** *"Why isn't there a button for X?"* →
-  *"Because it's yours, not ours."* That answer doesn't satisfy everyone, and
-  that's fine.
+- **Not a Cursor replacement.** No editor wrapper. iXaac runs in a terminal;
+  you bring your own editor.
+- **Not MCP.** Plugins are markdown files (with YAML frontmatter for the
+  structured ones) — easier to write, less standardized, no subprocess
+  servers. Different tradeoff, not a strict upgrade.
+- **Not vendor-curated.** No app store, no marketplace. You write the
+  plugins, the personas, the docs, the verbs. The system rewards investment
+  — and ignores you back if you don't put any in.
+- **Not casual-user-ready.** *"Why isn't there a button for X?"* answer is
+  *"because it's yours, not ours, write one yourself"* — which is the whole
+  point but isn't for everyone.
 
-## Who it's for
+## Who it's for (right now)
 
 People who already build their own bash aliases, dotfiles, NixOS configs,
-self-hosted services. People who type `:set` reflexively. People who want to
-invest in a tool and have the tool reward that investment.
+self-hosted services. People who type `:set` reflexively. People who want a
+tool they can compose against rather than be guided by.
 
-If you bounce off the setup, you're probably in the wrong audience — and
-that's a feature, not a bug.
+If you bounce off the setup, that's just information — iXaac in its current
+shape is asking a lot of the user. Maybe come back when the wizards ship,
+or maybe never. Both are fine.
 
 ## What's still alpha
 
 - **Plugin authoring wizard** — for now `xli plugin --new` opens `$EDITOR` on
   a template. An interactive `xli plugin add` wizard is designed but not
   built.
-- **High-risk plugin gating** — plugins declare a `risk:` field; risk-aware
-  confirmation gates beyond the existing bash intent gate are on the roadmap.
+- **Plugin search is keyword-based**, not semantic. Works fine for tens of
+  plugins; at scale (200+) needs a real RAG over a per-user catalog
+  Collection.
+- **`/debug` is single-model and manual.** Auto-trigger on heavy turns
+  (multi-file edits, refactor-shaped prompts, touches to `__init__.py` /
+  `pyproject.toml`) is designed but not built. Cross-model critic
+  (Grok-on-Grok shares blind spots — Claude or grok-code-fast as the critic
+  catches more) is the next unlock once auto-trigger lands.
+- **Manifest signature / hash check.** A compromised plugin update could
+  change `url:` to an exfiltration endpoint; today's defense is host-pinning
+  against the *new* manifest. Hash + diff re-prompt on subscription updates
+  is on the roadmap.
 - **Some xAI Collections operations are flaky** — `INTERNAL` errors happen
   occasionally on document updates; sync retries on rate-limit but not on
   `INTERNAL` yet.

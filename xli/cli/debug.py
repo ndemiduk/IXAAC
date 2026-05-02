@@ -56,11 +56,12 @@ def _last_user_prompt(agent) -> Optional[str]:
     return None
 
 
-def _git_diff_head(cwd) -> tuple[str, Optional[str]]:
-    """Return (diff_text, error). diff_text is empty if working tree clean."""
+def _git_diff(cwd, ref: str) -> tuple[str, Optional[str]]:
+    """Return (diff_text, error). diff_text is the diff from `ref` to the
+    current working tree (covers both committed and uncommitted changes)."""
     try:
         proc = subprocess.run(
-            ["git", "diff", "HEAD"],
+            ["git", "diff", ref],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -69,18 +70,18 @@ def _git_diff_head(cwd) -> tuple[str, Optional[str]]:
     except FileNotFoundError:
         return ("", "git not installed")
     except subprocess.TimeoutExpired:
-        return ("", "git diff HEAD timed out after 10s")
+        return ("", f"git diff {ref} timed out after 10s")
     if proc.returncode != 0:
-        err = proc.stderr.strip() or "git diff HEAD failed"
+        err = proc.stderr.strip() or f"git diff {ref} failed"
         return ("", err)
     return (proc.stdout, None)
 
 
-def _changed_files(cwd) -> list[str]:
-    """Return list of filenames touched (modified/added/deleted) vs HEAD."""
+def _changed_files(cwd, ref: str) -> list[str]:
+    """Return list of filenames touched between `ref` and current working tree."""
     try:
         proc = subprocess.run(
-            ["git", "diff", "HEAD", "--name-only"],
+            ["git", "diff", ref, "--name-only"],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -107,25 +108,36 @@ def _handle_debug_command(user_input: str, agent, project) -> bool:
         console.print("[dim]/debug: no prior chat turn this session — nothing to verify[/dim]")
         return True
 
-    diff_text, err = _git_diff_head(project.project_root)
+    # Prefer the per-turn baseline SHA so /debug captures everything since the
+    # turn started, including any commits made during the turn. Fall back to
+    # HEAD if no baseline (e.g. plain `xli ask` outside a turn loop).
+    ref = getattr(agent, "last_turn_baseline_sha", None) or "HEAD"
+    diff_text, err = _git_diff(project.project_root, ref)
     if err is not None:
         console.print(f"[red]/debug: {err}[/red]")
         return True
     if not diff_text.strip():
+        scope = (
+            f"since turn started (baseline {ref[:8]})"
+            if ref != "HEAD" else "vs HEAD"
+        )
         console.print(
-            "[dim]/debug: working tree clean vs HEAD — nothing to verify.[/dim]\n"
-            "[dim](if you committed since the last turn, the diff is gone — "
-            "verifier needs uncommitted changes to inspect)[/dim]"
+            f"[dim]/debug: no changes {scope} — nothing to verify.[/dim]"
         )
         return True
 
-    files = _changed_files(project.project_root)
+    files = _changed_files(project.project_root, ref)
     files_str = "\n".join(f"  - {f}" for f in files) if files else "  (none enumerated)"
+    scope = (
+        f"since turn baseline ({ref[:12]} → working tree, includes any commits made during the turn)"
+        if ref != "HEAD" else
+        "uncommitted vs HEAD"
+    )
 
     brief = (
         f"Original task:\n{last_prompt}\n\n"
-        f"Files changed (vs HEAD):\n{files_str}\n\n"
-        f"Diff (working tree vs HEAD):\n{diff_text}"
+        f"Files changed ({scope}):\n{files_str}\n\n"
+        f"Diff:\n{diff_text}"
     )
 
     # Spawn the verifier — same recipe as Agent._dispatch_subagent_call but

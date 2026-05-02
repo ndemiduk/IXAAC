@@ -555,8 +555,11 @@ def _chat_run_session(requested_name: Optional[str], *, yolo: bool) -> int:
             if intent:
                 user_input = (
                     f"Use plugin_search to find a subscribed plugin matching this "
-                    f"intent, then plugin_get + bash to invoke it. If no plugin "
-                    f"matches (NO_PLUGIN_MATCH), tell me — do not fabricate output. "
+                    f"intent. Pass the FULL intent (do not over-trim — leave value "
+                    f"words like 'bitcoin' or 'TSLA' in, they help match param hints). "
+                    f"For matches with `actions:`, invoke via plugin_call directly. "
+                    f"For matches marked [legacy], use plugin_get(mode='full') + bash. "
+                    f"If no plugin matches (NO_PLUGIN_MATCH), tell me — do not fabricate output. "
                     f"Intent: {intent}"
                 )
             # Fall through — user_input is now the rephrased prompt, sent to model.
@@ -787,8 +790,11 @@ def cmd_code(args: argparse.Namespace) -> int:
             if intent:
                 user_input = (
                     f"Use plugin_search to find a subscribed plugin matching this "
-                    f"intent, then plugin_get + bash to invoke it. If no plugin "
-                    f"matches (NO_PLUGIN_MATCH), tell me — do not fabricate output. "
+                    f"intent. Pass the FULL intent (do not over-trim — leave value "
+                    f"words like 'bitcoin' or 'TSLA' in, they help match param hints). "
+                    f"For matches with `actions:`, invoke via plugin_call directly. "
+                    f"For matches marked [legacy], use plugin_get(mode='full') + bash. "
+                    f"If no plugin matches (NO_PLUGIN_MATCH), tell me — do not fabricate output. "
                     f"Intent: {intent}"
                 )
             # Fall through — user_input is now the rephrased prompt, sent to model.

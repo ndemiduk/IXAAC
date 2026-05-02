@@ -274,58 +274,67 @@ def tool_schemas() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "plugin_search",
-                	                    "description": "Search subscribed plugins by intent. Returns top matches with actions + recommended plugin_call invocations. Prefer plugin_call for structured plugins.",
-	                    "parameters": {
-	                        "type": "object",
-	                        "properties": {
-	                            "intent": {
-	                                "type": "string",
-	                                "description": "What data or action you need (e.g. 'current weather in Aurora').",
-	                            },
-	                        },
-	                        "required": ["intent"],
-	                    },
+                "description": (
+                    "Search subscribed plugins by intent. Returns top matches with action signatures inline. "
+                    "For matches that list actions, you have everything you need to invoke — go straight to "
+                    "plugin_call. Do NOT follow up with plugin_get on those matches."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "description": "What data or action you need (e.g. 'current weather in Aurora').",
+                        },
+                    },
+                    "required": ["intent"],
+                },
             },
         },
         {
             "type": "function",
             "function": {
                 "name": "plugin_get",
-                	                "description": "Read a subscribed plugin. Use mode='manifest' (preferred, low tokens) to get only the action spec, mode='condensed' for summary, or mode='full' (default) for the complete .md.",
-	                "parameters": {
-	                    "type": "object",
-	                    "properties": {
-	                        "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
-	                        "mode": {"type": "string", "description": "manifest | condensed | full (default)", "enum": ["manifest", "condensed", "full"]},
-	                    },
-	                    "required": ["name"],
-	                },
+                "description": (
+                    "Read a plugin's full markdown docs. Only use for [legacy] plugins (no actions manifest) or "
+                    "when explicitly investigating docs for purposes OTHER than invocation. To invoke a structured "
+                    "action, use plugin_call directly — plugin_search already returned the action signatures."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Plugin id (from plugin_search results)"},
+                        "mode": {"type": "string", "description": "manifest | condensed | full (default)", "enum": ["manifest", "condensed", "full"]},
+                    },
+                    "required": ["name"],
+                },
             },
         },
         {
             "type": "function",
             "function": {
                 "name": "plugin_call",
-                	                    "description": (
-	                        "Invoke a structured plugin action directly — no curl needed. "
-	                        "Use plugin_search first to find plugins + actions. "
-	                        "For legacy plugins without actions, use plugin_get(mode='full') + bash."
-	                    ),
+                "description": (
+                    "REQUIRED for any plugin action that appears in plugin_search output with `(params)`. "
+                    "Invokes the structured action — handles auth/secret injection from the vault automatically. "
+                    "NEVER use bash/curl for an HTTP call that a manifest action covers; vault secrets are NOT in env, "
+                    "only plugin_call injects them. Only fall back to plugin_get + bash for plugins explicitly "
+                    "marked [legacy] in plugin_search output."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        	                        "plugin": {
-	                            "type": "string",
-	                            "description": "Plugin id from plugin_search (e.g. 'open-meteo').",
-	                        },
-	                        "action": {
-	                            "type": "string",
-	                            "description": "Action id from plugin_search output (e.g. 'current_weather').",
-	                        },
-	                        "params": {
-	                            "type": "object",
-	                            "description": "User params only (defaults/consts auto-filled).",
-                            "description": "Action parameters as key-value pairs.",
+                        "plugin": {
+                            "type": "string",
+                            "description": "Plugin id from plugin_search (e.g. 'open-meteo').",
+                        },
+                        "action": {
+                            "type": "string",
+                            "description": "Action id from plugin_search output (e.g. 'current_weather').",
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "User params only as key-value pairs; defaults/consts are auto-filled by the manifest.",
                         },
                     },
                     "required": ["plugin", "action", "params"],

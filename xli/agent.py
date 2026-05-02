@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -567,6 +568,10 @@ class Agent:
     # user prompt as the verifier brief, and after a long iter-loop the user
     # message has usually been condensed out of history.
     last_user_message: Optional[str] = None
+    # Git HEAD SHA snapshotted at run_turn entry. /debug diffs against this
+    # so it sees everything the turn changed regardless of whether the turn
+    # ended with a commit. `git diff <sha>` covers committed + uncommitted.
+    last_turn_baseline_sha: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.history:
@@ -747,6 +752,22 @@ class Agent:
         # Capture the raw user prompt before any plan-mode rewriting so /debug
         # can recover it after history condensation drops it.
         self.last_user_message = user_message
+
+        # Snapshot the git HEAD so /debug can diff against it later, capturing
+        # everything this turn changed even if it ends with a commit. Best
+        # effort — non-git repos and detached HEAD are fine, /debug falls back.
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(self.project.project_root),
+                capture_output=True, text=True, timeout=5,
+            )
+            if proc.returncode == 0:
+                self.last_turn_baseline_sha = proc.stdout.strip() or None
+            else:
+                self.last_turn_baseline_sha = None
+        except Exception:
+            self.last_turn_baseline_sha = None
 
         # Refresh the system prompt so /doc and /undoc take effect immediately.
         # Cheap when no docs are attached (string identity check); rebuilds

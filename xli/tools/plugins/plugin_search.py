@@ -37,7 +37,13 @@ def t_plugin_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "Suggest: install/subscribe a plugin that fits, or fall back to "
             "web_search/bash. Do NOT fabricate plugin output."
         )
-    out = ["Top matches — prefer `plugin_call` when the plugin lists actions (structured, no curl). Use `plugin_get` only for legacy plugins or full prose:"]
+    out = [
+        "Top matches. INVOCATION RULES:",
+        "  1. For matches that show `actions:` below — call plugin_call directly. You have everything you need. Do NOT call plugin_get on these.",
+        "  2. For matches marked [legacy] (no manifest) — use plugin_get(mode='full') then bash.",
+        "  3. NEVER use bash/curl for an HTTP request that a listed action covers — vault secrets are not in $env, only plugin_call injects them.",
+        "",
+    ]
     for p, score in matches:
         cats = ", ".join(p.categories()) or "—"
         manifest = p.manifest()
