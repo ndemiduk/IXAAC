@@ -355,17 +355,51 @@ def _handle_doc_command(user_input: str, agent, project) -> bool:
     return False
 
 
-def _handle_2ndeye_command(user_input: str, agent, project) -> bool:
-    """Handle `/2ndeye` slash command (MVP phases 1-3).
+_2NDEYE_USAGE = (
+    "[dim]usage: /2ndeye [scope] [--with-tools] [--from-debug | --from PATH] <question>[/dim]\n"
+    "[dim]  scope: (none, default = no history) | --turns | --last N | --since MARK | --full[/dim]\n"
+    "[dim]  --with-tools           include tool calls/results in sent history (default: stripped)[/dim]\n"
+    "[dim]  --from-debug           prepend latest .xli/debug-last.md as context[/dim]\n"
+    "[dim]  --from PATH            prepend the contents of any file as context[/dim]\n"
+    "[dim]  (configure secondary_ai in ~/.config/xli/config.json first)[/dim]"
+)
 
-    Bundles (scoped) conversation history + question, forwards to secondary_ai.query.
-    Attribution header added here; response is plain text from provider.
-    /2ndeye is slash-only, never on agent tool palette.
+
+def _filter_history_for_secondary(history: list) -> list:
+    """Strip tool_calls, tool-result messages, and pure-tool-call assistant
+    messages from history before sending to a secondary AI.
+
+    The secondary provider doesn't share iXaac's tool palette — tool metadata
+    is noise that adds tokens without informing the critique. Keeps user +
+    assistant text and system messages only. 5-10× reduction on long sessions.
+    """
+    filtered = []
+    for msg in history:
+        role = msg.get("role")
+        if role == "tool":
+            continue
+        if role == "assistant":
+            content = msg.get("content")
+            if not content:
+                continue
+            filtered.append({"role": "assistant", "content": content})
+        elif role in ("user", "system"):
+            content = msg.get("content")
+            if content:
+                filtered.append({"role": role, "content": content})
+    return filtered
+
+
+def _handle_2ndeye_command(user_input: str, agent, project) -> bool:
+    """Handle `/2ndeye` — user-invoked cross-vendor critique.
+
+    Default scope is empty (no history) so cheap general-purpose questions
+    don't ship the entire conversation to a second vendor every call.
+    Opt into history with --turns, --last N, --since MARK, or --full.
     """
     if not user_input.startswith("/2ndeye"):
         return False
 
-    # Parse: /2ndeye [--last N] [--since <mark>] <question>
     try:
         parts = shlex.split(user_input)
     except ValueError:
@@ -376,6 +410,11 @@ def _handle_2ndeye_command(user_input: str, agent, project) -> bool:
 
     last_n = None
     since_mark = None
+    use_full = False
+    use_turns = False
+    with_tools = False
+    from_debug = False
+    from_path: str | None = None
     q_parts: list[str] = []
     i = 1
     while i < len(parts):
@@ -398,41 +437,114 @@ def _handle_2ndeye_command(user_input: str, agent, project) -> bool:
             since_mark = parts[i + 1]
             i += 2
             continue
+        elif tok == "--from" and i + 1 < len(parts):
+            from_path = parts[i + 1]
+            i += 2
+            continue
+        elif tok == "--full":
+            use_full = True
+            i += 1
+            continue
+        elif tok == "--turns":
+            use_turns = True
+            i += 1
+            continue
+        elif tok == "--with-tools":
+            with_tools = True
+            i += 1
+            continue
+        elif tok == "--from-debug":
+            from_debug = True
+            i += 1
+            continue
         else:
             q_parts.append(tok)
             i += 1
 
     question = " ".join(q_parts).strip()
     if not question:
-        console.print(
-            "[dim]usage: /2ndeye [--last N] [--since <mark>] <question>[/dim]\n"
-            "[dim]  (configure secondary_ai in ~/.config/xli/config.json first)[/dim]"
-        )
+        console.print(_2NDEYE_USAGE)
         return True
 
-    # Pull history from agent (in-memory turns; survives condensation per debug.py pattern)
-    history = getattr(agent, "history", []) or []
-    if last_n is not None and last_n > 0:
-        # last N user+assistant pairs (rough; messages list)
-        history = history[-last_n * 2 :]
-    if since_mark:
-        console.print("[yellow]--since support deferred to later phase; using current history slice[/yellow]")
+    if from_debug and from_path:
+        console.print("[red]2ndeye: --from-debug and --from are mutually exclusive[/red]")
+        return True
 
-    # Call secondary (errors only on config/env/API boundary)
+    # Build history slice. NEW DEFAULT: no history. Opt-in via flag.
+    raw_history = getattr(agent, "history", []) or []
+    history: list = []
+    if use_full:
+        history = list(raw_history)
+    elif last_n is not None and last_n > 0:
+        history = raw_history[-last_n * 2:]
+    elif use_turns:
+        history = raw_history[-2:]
+    elif since_mark:
+        console.print(
+            "[yellow]2ndeye: --since support deferred (waiting on /mark); falling back to --full[/yellow]"
+        )
+        history = list(raw_history)
+
+    if history and not with_tools:
+        history = _filter_history_for_secondary(history)
+
+    # Build context preamble from --from-debug or --from PATH.
+    preamble = ""
+    if from_debug:
+        debug_path = project.xli_dir / "debug-last.md"
+        if not debug_path.exists():
+            console.print(
+                "[red]2ndeye: no /debug output saved yet — run /debug first.[/red]"
+            )
+            return True
+        try:
+            debug_body = debug_path.read_text()
+        except OSError as e:
+            console.print(f"[red]2ndeye: cannot read {debug_path}: {e}[/red]")
+            return True
+        preamble = (
+            f"--- /debug output ---\n{debug_body}\n--- end /debug output ---\n\n"
+        )
+    elif from_path:
+        from pathlib import Path
+        p = Path(from_path).expanduser()
+        if not p.exists():
+            console.print(f"[red]2ndeye: file not found: {from_path}[/red]")
+            return True
+        try:
+            file_body = p.read_text()
+        except OSError as e:
+            console.print(f"[red]2ndeye: cannot read {from_path}: {e}[/red]")
+            return True
+        preamble = f"--- {p} ---\n{file_body}\n--- end {p} ---\n\n"
+
+    full_question = preamble + question
+
+    # Build a short scope summary for the spinner header / debugging.
+    scope_label = (
+        "--full" if use_full
+        else f"--last {last_n}" if last_n
+        else "--turns" if use_turns
+        else "--since" if since_mark
+        else "no history"
+    )
+    if from_debug:
+        scope_label += " + debug"
+    elif from_path:
+        scope_label += f" + {from_path}"
+
     try:
         from xli.secondary_ai import query
-        response = query(history, question, scope=f"--last {last_n}" if last_n else None)
+        response = query(history, full_question, scope=scope_label)
     except Exception as exc:
-        # Boundary errors from query are user-actionable; surface cleanly
         console.print(f"[red]2ndeye: {exc}[/red]")
         return True
 
-    # Attribution header + response (per spec)
-    cfg = __import__("xli.config", fromlist=["GlobalConfig"]).GlobalConfig.load()
+    from xli.config import GlobalConfig
+    cfg = GlobalConfig.load()
     sec = getattr(cfg, "secondary_ai", {}) or {}
     model = sec.get("model", "secondary")
-    header = f"[2ndeye · {model}]"
-    console.print(f"\n{header}")
+    console.print(f"\n[2ndeye · {model}]")
     console.print(response)
     console.print()
     return True

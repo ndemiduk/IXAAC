@@ -10,6 +10,7 @@ next turn unless the user reacts to it).
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime
 from typing import Optional
 
 from rich.console import Console
@@ -183,5 +184,20 @@ def _handle_debug_command(user_input: str, agent, project) -> bool:
         f"[dim]verifier[{worker_clients.label}] · {call.model} · "
         f"{call.iterations} iter · {format_tokens(call.total_tokens)}{cost_part}[/dim]"
     )
+
+    # Save output to .xli/debug-last.md so /2ndeye --from-debug can pull it.
+    # Best-effort; never block /debug on save failure.
+    try:
+        debug_path = project.xli_dir / "debug-last.md"
+        ts = datetime.now().isoformat(timespec="seconds")
+        debug_path.write_text(
+            f"# /debug — {ts}\n\n"
+            f"## Original task\n{last_prompt}\n\n"
+            f"## Files reviewed ({n_files}, {scope})\n{files_str}\n\n"
+            f"## Verifier ({worker_clients.label} · {call.model} · "
+            f"{call.iterations} iter)\n\n{text}\n"
+        )
+    except OSError:
+        pass
 
     return True
